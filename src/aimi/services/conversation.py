@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from aimi.llm.client import ChatMessage, LLMClient
+
 
 class MessageRepository(Protocol):
     """Интерфейс доступа к сохранению сообщений."""
@@ -18,21 +20,29 @@ class MessageRepository(Protocol):
         ...
 
 
-@dataclass
+@dataclass(slots=True)
 class ConversationService:
-    """High-level entrypoint for chat interactions (skeleton)."""
+    """High-level entrypoint for chat interactions (initial implementation)."""
 
     message_repository: MessageRepository
+    llm_client: LLMClient
 
-    async def handle_incoming(self, payload: dict) -> dict:
-        """Handle an incoming message and return assistant response.
+    async def handle_incoming(self, *, user_id: str, message: str) -> dict[str, str]:
+        """Handle an incoming message and return assistant response."""
 
-        Реальная логика появится на последующих этапах: пока просто сохраняем входные данные
-        и возвращаем заглушку.
-        """
+        await self.message_repository.save(
+            {"user_id": user_id, "role": "user", "content": message}
+        )
 
-        await self.message_repository.save(payload)
-        return {"reply": "Aimi is not ready yet."}
+        reply = await self.llm_client.generate(
+            [ChatMessage(role="user", content=message)]
+        )
+
+        await self.message_repository.save(
+            {"user_id": user_id, "role": "assistant", "content": reply}
+        )
+
+        return {"reply": reply, "model": self.llm_client.model_name}
 
 
 __all__ = ["ConversationService", "MessageRepository"]

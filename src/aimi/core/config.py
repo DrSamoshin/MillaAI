@@ -28,6 +28,9 @@ class AppSettings(BaseSettings):
 
     openai_api_key: Annotated[Optional[str], Field(default=None)]
     openai_base_url: Annotated[Optional[str], Field(default=None)]
+    openai_model: Annotated[
+        str, Field(default="gpt-4o-mini", description="Default OpenAI chat model")
+    ]
 
     class Config:
         env_file = ".env"

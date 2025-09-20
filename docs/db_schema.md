@@ -3,9 +3,11 @@
 ## users
 - `id UUID PRIMARY KEY`
 - `email TEXT` (optional)
+- `apple_id TEXT UNIQUE` (optional)
 - `display_name TEXT`
 - `timezone TEXT`
 - `locale TEXT`
+- `is_active BOOLEAN`
 - `created_at TIMESTAMPTZ`
 - `updated_at TIMESTAMPTZ`
 - `profile JSONB` (статичные поля: профессия, предпочтения и т.д.)

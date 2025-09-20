@@ -6,11 +6,17 @@ from functools import lru_cache
 from typing import Annotated, Optional
 
 from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class AppSettings(BaseSettings):
     """Base settings for the Aimi backend."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_prefix="AIMI_",
+    )
 
     api_host: Annotated[str, Field(default="0.0.0.0", description="FastAPI host")]
     api_port: Annotated[int, Field(default=8000, description="FastAPI port")]
@@ -22,20 +28,31 @@ class AppSettings(BaseSettings):
     ]
 
     database_url: Annotated[
-        str, Field(default="postgresql://aimi:aimi@localhost:5432/aimi")
+        str, Field(default="postgresql+asyncpg://aimi:aimi@localhost:5432/aimi")
     ]
     redis_url: Annotated[str, Field(default="redis://localhost:6379/0")]
+    session_cache_ttl: Annotated[
+        int,
+        Field(
+            default=600,
+            description="Redis session cache TTL in seconds",
+            gt=0,
+        ),
+    ]
+    session_cache_max_messages: Annotated[
+        int,
+        Field(
+            default=30,
+            description="Maximum number of messages to keep per session",
+            gt=0,
+        ),
+    ]
 
     openai_api_key: Annotated[Optional[str], Field(default=None)]
     openai_base_url: Annotated[Optional[str], Field(default=None)]
     openai_model: Annotated[
         str, Field(default="gpt-4o-mini", description="Default OpenAI chat model")
     ]
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        env_prefix = "AIMI_"
 
 
 @lru_cache

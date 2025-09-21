@@ -6,18 +6,26 @@ import argparse
 import asyncio
 import json
 import sys
+from getpass import getpass
 from typing import Optional
-from uuid import UUID, uuid4
 
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-DEFAULT_WS_URL = "ws://127.0.0.1:8000/ws/chat"
+DEFAULT_WS_URL = "ws://127.0.0.1:8000/v1/ws/chat"
 
 
-async def chat_loop(url: str, user_id: UUID) -> None:
-    async for websocket in websockets.connect(f"{url}?user_id={user_id}"):
-        print(f"Connected to {url} as {user_id}. Type messages, 'exit' to quit.")
+async def chat_loop(url: str, token: str | None) -> None:
+    headers = None
+    if token:
+        headers = {"Authorization": f"Bearer {token}"}
+
+    connect_kwargs: dict[str, object] = {}
+    if headers:
+        connect_kwargs["additional_headers"] = headers
+
+    async for websocket in websockets.connect(url, **connect_kwargs):
+        print(f"Connected to {url}. Type messages, 'exit' to quit.")
         try:
             while True:
                 try:
@@ -57,19 +65,18 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--url", default=DEFAULT_WS_URL, help="WebSocket endpoint, default %(default)s"
     )
     parser.add_argument(
-        "--user-id",
-        type=UUID,
+        "--token",
         default=None,
-        help="Existing user UUID. If omitted, random UUID",
+        help="Access token used for Authorization header. If omitted, prompt will appear.",
     )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[list[str]] = None) -> None:
     args = parse_args(argv)
-    user_id = args.user_id or uuid4()
+    token = args.token or getpass("Access token: ").strip()
     try:
-        asyncio.run(chat_loop(args.url, user_id))
+        asyncio.run(chat_loop(args.url, token or None))
     except KeyboardInterrupt:  # pragma: no cover
         print("\nInterrupted.")
 

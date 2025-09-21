@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from aimi.core.errors import BaseAppError
 
-from .schemas import ErrorInfo, ErrorResponse
+from .v1.schemas import ErrorInfo, ErrorResponse
 
 logger = logging.getLogger(__name__)
 

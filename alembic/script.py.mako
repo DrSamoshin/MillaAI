@@ -1,20 +1,17 @@
-<%!
-from alembic import util
-%>
-<%text>
 """${message}"""
 
 from __future__ import annotations
+
+from typing import Sequence
 
 from alembic import op
 import sqlalchemy as sa
 ${imports if imports else ""}
 
-
-revision = ${repr(revision)}
-down_revision = ${repr(down_revision)}
-branch_labels = ${repr(branch_labels)}
-depends_on = ${repr(depends_on)}
+revision: str = ${repr(up_revision)}
+down_revision: str | Sequence[str] | None = ${repr(down_revision)}
+branch_labels: str | Sequence[str] | None = ${repr(branch_labels)}
+depends_on: str | Sequence[str] | None = ${repr(depends_on)}
 
 
 def upgrade() -> None:
@@ -23,4 +20,3 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     ${downgrades if downgrades else "pass"}
-</%text>

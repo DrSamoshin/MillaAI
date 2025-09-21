@@ -8,7 +8,10 @@ from pydantic import BaseModel, Field
 class ChatRequest(BaseModel):
     """Payload submitted when a user sends a chat message."""
 
-    user_id: str = Field(..., description="Identifier of the user sending the message.")
+    user_id: str | None = Field(
+        default=None,
+        description="Identifier of the user sending the message; defaults to the authenticated user.",
+    )
     message: str = Field(..., description="User message content.")
 
 

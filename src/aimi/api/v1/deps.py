@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from fastapi import Depends, HTTPException, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from aimi.core.config import get_settings
 from aimi.core.errors import ServiceError
 from aimi.core.redis import get_redis_client
@@ -11,7 +15,10 @@ from aimi.llm.client import LLMClient
 from aimi.llm.openai import OpenAIChatClient
 from aimi.memory.cache.session import SessionCache
 from aimi.repositories.messages import InMemoryMessageRepository
+from aimi.db.models import User
+from aimi.repositories.users import UserRepository
 from aimi.services.conversation import ConversationService
+from aimi.services.auth import AuthService
 from aimi.db.session import get_db_session
 
 
@@ -42,6 +49,11 @@ def get_llm_client() -> LLMClient:
 
 
 @lru_cache
+def get_auth_service() -> AuthService:
+    return AuthService(get_settings())
+
+
+@lru_cache
 def get_session_cache() -> SessionCache:
     """Instantiate the Redis-backed session cache."""
 
@@ -64,10 +76,46 @@ def get_conversation_service() -> ConversationService:
     )
 
 
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Security(bearer_scheme),
+    session: AsyncSession = Depends(get_db_session),
+    service: AuthService = Depends(get_auth_service),
+) -> User:
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header missing",
+        )
+
+    token = credentials.credentials.strip()
+
+    try:
+        user_id = service.parse_access_token(token)
+    except Exception as exc:  # pragma: no cover - invalid token path
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        ) from exc
+
+    repo = UserRepository(session)
+    user = await repo.get_by_id(user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+    return user
+
+
 __all__: list[str] = [
     "get_conversation_service",
     "get_llm_client",
     "get_message_repository",
     "get_session_cache",
     "get_db_session",
+    "get_auth_service",
+    "get_current_user",
 ]

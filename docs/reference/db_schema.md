@@ -2,15 +2,12 @@
 
 ## users
 - `id UUID PRIMARY KEY`
-- `email TEXT` (optional)
-- `apple_id TEXT UNIQUE` (optional)
+- `email TEXT`
+- `apple_id TEXT UNIQUE`
 - `display_name TEXT`
-- `timezone TEXT`
-- `locale TEXT`
+- `role TEXT` (`user`, `admin`)
 - `is_active BOOLEAN`
 - `created_at TIMESTAMPTZ`
-- `updated_at TIMESTAMPTZ`
-- `profile JSONB` (статичные поля: профессия, предпочтения и т.д.)
 
 ## user_state
 - `user_id UUID PRIMARY KEY REFERENCES users(id)`

@@ -18,6 +18,7 @@ dependencies = [
     "asyncpg>=0.29",
     "alembic>=1.13",
     "greenlet>=3.0",
+    "pyjwt>=2.9",
 ]
 
 [tool.uv]
@@ -36,7 +37,14 @@ pythonpath = ["src"]
 asyncio_mode = "auto"
 
 [tool.ruff]
-exclude = ["alembic/"]
+exclude = ["alembic/", "scripts/generate_tokens.py"]
 
 [tool.ruff.format]
-exclude = ["alembic/"]
+exclude = ["alembic/", "scripts/generate_tokens.py"]
+
+[tool.mypy]
+python_version = "3.13"
+
+[[tool.mypy.overrides]]
+module = "alembic.*"
+ignore_missing_imports = true

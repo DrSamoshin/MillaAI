@@ -55,4 +55,4 @@
 - WS-уведомления / push-канал.
 - Подготовка API для iOS.
 
-Каждый этап закрывается PR-ом с документацией и тестами. Если в ходе разработки архитектура меняется — обновляем `docs/architecture.md`, `docs/cache_pipeline.md`, `docs/db_schema.md`.
+Каждый этап закрывается PR-ом с документацией и тестами. Если в ходе разработки архитектура меняется — обновляем `docs/architecture/architecture.md`, `docs/architecture/cache_pipeline.md`, `docs/reference/db_schema.md`.

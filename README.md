@@ -16,10 +16,13 @@ We are rebuilding the backend from scratch. The code in `src/aimi` is currently 
 
 Further details live in:
 
-- `docs/architecture.md` — component interactions and end-to-end flow.
-- `docs/db_schema.md` — relational tables (`users`, `goals`, `events`, `user_state`, `memory_vectors`, ...).
-- `docs/cache_pipeline.md` — Redis cache layout and session termination triggers.
-- `docs/tasks.md` — development roadmap.
+- `docs/architecture/architecture.md` — component interactions and end-to-end flow.
+- `docs/reference/db_schema.md` — relational tables (`users`, `goals`, `events`, `user_state`, `memory_vectors`, ...).
+- `docs/architecture/cache_pipeline.md` — Redis cache layout and session termination triggers.
+- `docs/api/api_auth.md` — Apple Sign In and JWT endpoints.
+- `docs/api/api_users.md` — User profile and account management endpoints.
+- `docs/api/api_admin.md` — Administrative actions (migrations).
+- `docs/planning/tasks.md` — development roadmap.
 
 ## Local development
 - Dependencies: `uv sync`
@@ -31,6 +34,9 @@ Further details live in:
 - Session cache knobs via `.env`:
   - `AIMI_SESSION_CACHE_TTL=600` (seconds before a session expires)
   - `AIMI_SESSION_CACHE_MAX_MESSAGES=30` (number of recent messages kept)
-- Command quick-reference: see [`docs/dev_commands.md`](docs/dev_commands.md)
+- JWT configuration via `.env`:
+  - `AIMI_JWT_SECRET`, `AIMI_JWT_ALGORITHM`
+  - `AIMI_JWT_ACCESS_EXPIRES_SECONDS`, `AIMI_JWT_REFRESH_EXPIRES_SECONDS`
+- Command quick-reference: see [`docs/guides/dev_commands.md`](docs/guides/dev_commands.md)
 
 > The service is still under heavy development. Keep the documentation up to date as implementation progresses.

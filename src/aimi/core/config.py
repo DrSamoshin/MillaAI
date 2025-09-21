@@ -54,6 +54,34 @@ class AppSettings(BaseSettings):
         str, Field(default="gpt-4o-mini", description="Default OpenAI chat model")
     ]
 
+    jwt_secret: Annotated[
+        str,
+        Field(
+            default="change-me",
+            description="Secret key used to sign JWT tokens",
+        ),
+    ]
+    jwt_algorithm: Annotated[
+        str,
+        Field(default="HS256", description="Algorithm for JWT signing"),
+    ]
+    jwt_access_expires_seconds: Annotated[
+        int,
+        Field(
+            default=900,
+            description="Access token lifetime in seconds",
+            gt=0,
+        ),
+    ]
+    jwt_refresh_expires_seconds: Annotated[
+        int,
+        Field(
+            default=2592000,
+            description="Refresh token lifetime in seconds",
+            gt=0,
+        ),
+    ]
+
 
 @lru_cache
 def get_settings() -> AppSettings:

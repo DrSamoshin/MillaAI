@@ -12,5 +12,8 @@ __pycache__/
 .vscode/
 .secrets/
 
+# Docker volumes
+docker/volumes/
+
 # OS
 .DS_Store

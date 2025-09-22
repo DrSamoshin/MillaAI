@@ -1,6 +1,8 @@
-# Схема БД Aimi (черновик)
+# Схема БД Aimi - Updated Chat System
 
-## users
+## Core Tables
+
+### users
 - `id UUID PRIMARY KEY`
 - `email TEXT`
 - `apple_id TEXT UNIQUE`
@@ -8,6 +10,33 @@
 - `role TEXT` (`user`, `admin`)
 - `is_active BOOLEAN`
 - `created_at TIMESTAMPTZ`
+
+### chats
+- `id UUID PRIMARY KEY`
+- `user_id UUID REFERENCES users(id)`
+- `title TEXT` (nullable for default chats)
+- `model TEXT` (e.g., "gpt-4")
+- `settings JSONB` (temperature, system_prompt, etc.)
+- `last_seq INTEGER DEFAULT 0`
+- `last_active_at TIMESTAMPTZ`
+- `created_at TIMESTAMPTZ`
+- `archived BOOLEAN DEFAULT false`
+
+### messages
+- `id UUID PRIMARY KEY`
+- `chat_id UUID REFERENCES chats(id)`
+- `seq INTEGER` (monotonic within chat)
+- `role TEXT` (`user`, `assistant`, `system`)
+- `content TEXT`
+- `created_at TIMESTAMPTZ`
+- `truncated BOOLEAN DEFAULT false`
+- `from_summary BOOLEAN DEFAULT false`
+- `request_id UUID` (for idempotency)
+
+**Indexes:**
+- `(chat_id, seq)` - for message ordering
+- `(chat_id, created_at)` - for time-based queries
+- `(request_id)` - for duplicate detection
 
 ## user_state
 - `user_id UUID PRIMARY KEY REFERENCES users(id)`

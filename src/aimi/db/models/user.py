@@ -6,11 +6,17 @@ import uuid
 from datetime import datetime
 from enum import Enum as PyEnum
 
+from typing import TYPE_CHECKING
+
 from sqlalchemy import Boolean, DateTime, Enum, Index, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from aimi.db.base import Base
+
+if TYPE_CHECKING:
+    from aimi.db.models.chat import Chat
+    from aimi.db.models.goals import Goal, MentalState
 
 
 class UserRole(PyEnum):
@@ -50,6 +56,11 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+    # Relationships
+    chats: Mapped[list[Chat]] = relationship("Chat", back_populates="user", cascade="all, delete-orphan")
+    goals: Mapped[list[Goal]] = relationship("Goal", back_populates="user", cascade="all, delete-orphan")
+    mental_states: Mapped[list[MentalState]] = relationship("MentalState", back_populates="user", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"User(id={self.id!s}, email={self.email!r})"

@@ -41,9 +41,12 @@
   - Describe table: `\d+ users`
   - Run query: `SELECT * FROM users LIMIT 5;`
 - Redis shell: `docker exec -it aimi_redis redis-cli`
-  - List keys: `KEYS session:*`
-  - Inspect session messages: `LRANGE session:<user_id> 0 -1`
-  - Check TTL: `TTL session:<user_id>`
+  - List all keys: `KEYS *`
+  - List chat keys: `KEYS chat:*`
+  - View chat messages: `ZRANGE chat:{chat_id}:messages 0 -1`
+  - View chat metadata: `HGETALL chat:{chat_id}:meta`
+  - Count messages: `ZCARD chat:{chat_id}:messages`
+  - Latest messages: `ZREVRANGE chat:{chat_id}:messages 0 10`
 
 ## Miscellaneous
 - Clean up stale git lock (if needed): `rm -f .git/index.lock`

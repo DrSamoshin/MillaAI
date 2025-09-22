@@ -1,3 +1,4 @@
+
 """Generate JWT access/refresh tokens for a given user id."""
 
 from __future__ import annotations

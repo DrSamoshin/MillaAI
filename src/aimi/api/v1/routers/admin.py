@@ -15,7 +15,8 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 
 def _run_migrations() -> None:
-    root = Path(__file__).resolve().parents[4]
+    root = Path(__file__).resolve().parents[5]
+    print(root)
     cfg = Config(str(root / "alembic.ini"))
     cfg.set_main_option("script_location", str(root / "alembic"))
     command.upgrade(cfg, "head")

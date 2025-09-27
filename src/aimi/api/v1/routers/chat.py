@@ -6,14 +6,22 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.exceptions import WebSocketException
-from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aimi.api.v1.deps import get_auth_service, get_current_user, get_db_session
 from aimi.api.v1.schemas import SuccessResponse
-from aimi.db.models import User
-from aimi.db.models.chat import Chat
+from aimi.api.v1.schemas.chat import (
+    ChatListItem,
+    ChatListResponse,
+    CreateChatRequest,
+    CreateChatResponse,
+    MessageHistoryResponse,
+    MessageItem,
+    SendMessageRequest,
+    SendMessageResponse,
+)
+from aimi.db.models import Chat, User
 from aimi.repositories.users import UserRepository
 from aimi.services.auth import AuthService
 from aimi.services.chat import ChatService
@@ -22,70 +30,6 @@ from aimi.services.deps import get_chat_service
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 ws_router = APIRouter(prefix="/ws", tags=["chats"])
-
-
-class CreateChatRequest(BaseModel):
-    """Request to create a new chat."""
-    title: str | None = None
-    model: str = "gpt-4"
-    settings: dict | None = None
-
-
-class CreateChatResponse(BaseModel):
-    """Response with created chat info."""
-    chat_id: str
-    title: str | None
-    model: str
-    settings: dict
-
-
-class SendMessageRequest(BaseModel):
-    """Request to send message."""
-    content: str
-    client_msg_id: str | None = None
-
-
-class SendMessageResponse(BaseModel):
-    """Response with user and assistant messages."""
-    user_message: dict
-    assistant_message: dict
-    status: str
-    model: str
-
-
-class ChatListItem(BaseModel):
-    """Chat item in list."""
-    chat_id: str
-    title: str | None
-    model: str
-    settings: dict
-    last_seq: int | None
-    last_active_at: str | None
-    created_at: str
-
-
-class ChatListResponse(BaseModel):
-    """Response with list of user's chats."""
-    chats: list[ChatListItem]
-    total: int
-
-
-class MessageItem(BaseModel):
-    """Message item in history."""
-    id: str
-    seq: int
-    role: str
-    content: str
-    created_at: str
-    truncated: bool
-    from_summary: bool
-
-
-class MessageHistoryResponse(BaseModel):
-    """Response with chat message history."""
-    messages: list[MessageItem]
-    total: int
-    has_more: bool
 
 
 async def _get_current_user_ws(
@@ -232,7 +176,20 @@ async def send_message(
         user_id=current_user.id,
     )
 
-    return SuccessResponse(data=SendMessageResponse(**result))
+    # Convert Message object to dict for JSON serialization
+    if hasattr(result, 'role'):  # Check if it's a Message object
+        result_dict = {
+            "id": str(result.id),
+            "seq": result.seq,
+            "role": result.role,
+            "content": result.content,
+            "created_at": result.created_at.isoformat(),
+            "request_id": str(result.request_id) if result.request_id else None,
+        }
+    else:
+        result_dict = result
+
+    return SuccessResponse(data=SendMessageResponse(**result_dict))
 
 
 @ws_router.websocket("/chat/{chat_id}")
@@ -284,10 +241,23 @@ async def chat_websocket(
                     user_id=current_user.id,
                 )
 
+                # Convert Message object to dict for JSON serialization
+                if hasattr(result, 'role'):  # Check if it's a Message object
+                    result_dict = {
+                        "id": str(result.id),
+                        "seq": result.seq,
+                        "role": result.role,
+                        "content": result.content,
+                        "created_at": result.created_at.isoformat(),
+                        "request_id": str(result.request_id) if result.request_id else None,
+                    }
+                else:
+                    result_dict = result
+
                 # Send response
                 await websocket.send_json({
                     "status": "success",
-                    "data": result,
+                    "data": result_dict,
                 })
 
             except Exception as e:

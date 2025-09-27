@@ -9,19 +9,24 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from redis.asyncio import Redis
-from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aimi.db.models.chat import Chat, Message, MessageRole
+from aimi.db.models import Chat, Message, MessageRole
 from aimi.llm.client import ChatMessage, LLMClient
-from aimi.llm.tools import GoalManagementTools
+from aimi.repositories.chats import ChatRepository
+from aimi.repositories.messages import MessageRepository
 from aimi.services.connection_manager import connection_manager
+from aimi.services.conversation import ConversationOrchestrator
 
 logger = logging.getLogger(__name__)
 
 
 class ChatService:
-    """Service for chat operations with Redis cache and WebSocket activity tracking."""
+    """Service for chat operations with Redis cache and WebSocket activity tracking.
+
+    Focused on CRUD operations, message persistence, and chat management.
+    LLM orchestration is handled by ConversationOrchestrator.
+    """
 
     def __init__(
         self,
@@ -32,6 +37,8 @@ class ChatService:
         self.db = db_session
         self.redis = redis
         self.llm_client = llm_client
+        self.chat_repo = ChatRepository(db_session)
+        self.message_repo = MessageRepository(db_session)
 
     async def send_message(
         self,
@@ -40,46 +47,70 @@ class ChatService:
         client_msg_id: str | None = None,
         user_id: UUID | None = None,
     ) -> dict[str, Any]:
-        """Send message and generate response."""
+        """Send message and generate response using ConversationOrchestrator."""
         # 1. Ensure chat exists (auto-create if needed)
         await self._ensure_chat_exists(chat_id, user_id)
 
         # 2. Save user message
         user_msg = await self._save_message(
             chat_id=chat_id,
-            role=MessageRole.USER,
+            role=MessageRole.USER.value,
             content=content,
             client_msg_id=client_msg_id,
         )
 
-        # 2. Check if need "thinking" message for long processing
-        thinking_task = None
         try:
-            # 3. Build context and generate response
+            # 3. Build conversation context
             context = await self._build_context(chat_id, content)
 
-            # 4. Check for goal extraction before generating response
-            await self._process_goal_extraction(chat_id, content, user_id)
+            # 4. Use ConversationOrchestrator for enhanced response generation
+            if user_id:
+                orchestrator = ConversationOrchestrator(
+                    db_session=self.db,
+                    llm_client=self.llm_client,
+                    user_id=user_id,
+                    chat_id=chat_id
+                )
 
-            # Generate response
-            reply = await self.llm_client.generate(context)
+                # Generate response with tool support
+                orchestration_result = await orchestrator.generate_response(
+                    messages=context[1:],  # Skip system message from context
+                    user_message=content
+                )
 
-            # 4. Save assistant response
+                reply = orchestration_result["content"]
+                tool_calls = orchestration_result.get("tool_calls", [])
+                tool_results = orchestration_result.get("tool_results", [])
+
+                # Log tool usage for debugging
+                if tool_calls:
+                    logger.info(f"LLM made {len(tool_calls)} tool calls for chat {chat_id}")
+                if tool_results:
+                    logger.info(f"Tool results: {tool_results}")
+
+            else:
+                # Fallback for cases without user_id
+                reply = await self.llm_client.generate(context)
+                tool_calls = []
+                tool_results = []
+
+            # 5. Save assistant response
             assistant_msg = await self._save_message(
                 chat_id=chat_id,
-                role=MessageRole.ASSISTANT,
+                role=MessageRole.ASSISTANT.value,
                 content=reply,
             )
 
-            # 5. Check if chat is active and handle notification
+            # 6. Handle notification if chat is inactive
             is_active = self._is_chat_active(chat_id)
-
             if not is_active:
                 await self._send_push_notification(chat_id, reply)
 
             return {
                 "user_message": self._message_to_dict(user_msg),
                 "assistant_message": self._message_to_dict(assistant_msg),
+                "tool_calls": tool_calls,
+                "tool_results": tool_results,
                 "status": "delivered" if is_active else "push_sent",
                 "model": self.llm_client.model_name,
             }
@@ -89,13 +120,15 @@ class ChatService:
             # Send error response
             error_msg = await self._save_message(
                 chat_id=chat_id,
-                role=MessageRole.ASSISTANT,
-                content="Извините, произошла ошибка при генерации ответа. Попробуйте еще раз.",
+                role=MessageRole.ASSISTANT.value,
+                content="I encountered an error while processing your request. Please try again.",
             )
 
             return {
                 "user_message": self._message_to_dict(user_msg),
                 "assistant_message": self._message_to_dict(error_msg),
+                "tool_calls": [],
+                "tool_results": [],
                 "status": "error",
                 "model": self.llm_client.model_name,
             }
@@ -117,10 +150,7 @@ class ChatService:
     ) -> None:
         """Ensure chat exists, create if needed."""
         # Check if chat already exists
-        result = await self.db.execute(
-            select(Chat).where(Chat.id == chat_id)
-        )
-        existing_chat = result.scalar_one_or_none()
+        existing_chat = await self.chat_repo.get_by_id(chat_id)
 
         if existing_chat:
             return  # Chat already exists
@@ -129,17 +159,14 @@ class ChatService:
         if not user_id:
             raise ValueError("user_id required to create new chat")
 
-        # Create new chat
-        new_chat = Chat(
-            id=chat_id,
+        # Create new chat using repository
+        await self.chat_repo.create_chat(
+            chat_id=chat_id,
             user_id=user_id,
             title=title,
             model=model,
-            settings=settings or {"temperature": 0.7},
+            settings=settings,
         )
-
-        self.db.add(new_chat)
-        await self.db.flush()
         await self.db.commit()
 
         if title:
@@ -150,23 +177,18 @@ class ChatService:
     async def delete_chat(self, chat_id: UUID, user_id: UUID) -> bool:
         """Delete chat and all its messages."""
         # Check if chat exists and belongs to user
-        result = await self.db.execute(
-            select(Chat).where(Chat.id == chat_id, Chat.user_id == user_id)
-        )
-        chat = result.scalar_one_or_none()
+        chat = await self.chat_repo.get_user_chat_by_id(chat_id, user_id)
 
         if not chat:
             return False
 
         # Delete all messages first (due to foreign key constraint)
-        await self.db.execute(
-            delete(Message).where(Message.chat_id == chat_id)
-        )
+        await self.message_repo.delete_chat_messages(chat_id)
 
         # Delete chat
-        await self.db.execute(
-            delete(Chat).where(Chat.id == chat_id)
-        )
+        deleted = await self.chat_repo.delete_chat(chat_id)
+        if not deleted:
+            return False
 
         await self.db.commit()
 
@@ -189,10 +211,7 @@ class ChatService:
     ) -> dict[str, Any]:
         """Get message history for a chat with pagination."""
         # First verify chat exists and belongs to user
-        result = await self.db.execute(
-            select(Chat).where(Chat.id == chat_id, Chat.user_id == user_id)
-        )
-        chat = result.scalar_one_or_none()
+        chat = await self.chat_repo.get_user_chat_by_id(chat_id, user_id)
 
         if not chat:
             raise ValueError("Chat not found or not owned by user")
@@ -214,8 +233,6 @@ class ChatService:
                         "role": msg_data["role"],
                         "content": msg_data["content"],
                         "created_at": msg_data["created_at"],
-                        "truncated": msg_data["truncated"],
-                        "from_summary": msg_data["from_summary"],
                     })
                 except (json.JSONDecodeError, KeyError):
                     continue
@@ -231,19 +248,11 @@ class ChatService:
 
         else:
             # Fallback to PostgreSQL for pagination or cache miss
-            count_result = await self.db.execute(
-                select(func.count(Message.id)).where(Message.chat_id == chat_id)
+            db_messages, total_messages = await self.message_repo.get_chat_messages(
+                chat_id=chat_id,
+                limit=limit,
+                offset=offset
             )
-            total_messages = count_result.scalar() or 0
-
-            db_result = await self.db.execute(
-                select(Message)
-                .where(Message.chat_id == chat_id)
-                .order_by(Message.seq.desc())
-                .offset(offset)
-                .limit(limit)
-            )
-            db_messages = db_result.scalars().all()
 
             messages = [
                 {
@@ -252,8 +261,6 @@ class ChatService:
                     "role": msg.role,
                     "content": msg.content,
                     "created_at": msg.created_at.isoformat(),
-                    "truncated": msg.truncated,
-                    "from_summary": msg.from_summary,
                 }
                 for msg in reversed(db_messages)  # Reverse to get chronological order
             ]
@@ -276,47 +283,32 @@ class ChatService:
         """Save message to database and Redis cache."""
         # Check for duplicate if client_msg_id provided
         if client_msg_id:
-            existing = await self.db.execute(
-                select(Message).where(
-                    Message.chat_id == chat_id,
-                    Message.request_id == UUID(client_msg_id),
-                )
+            existing_msg = await self.message_repo.get_by_request_id(
+                chat_id, UUID(client_msg_id)
             )
-            existing_msg = existing.scalar_one_or_none()
             if existing_msg:
                 return existing_msg
 
         # Get next sequence number
-        result = await self.db.execute(
-            select(func.coalesce(func.max(Message.seq), 0) + 1).where(
-                Message.chat_id == chat_id
-            )
-        )
-        next_seq = result.scalar() or 1
+        next_seq = await self.message_repo.get_next_sequence(chat_id)
 
-        # Create message
-        message = Message(
+        # Create message using repository
+        message = await self.message_repo.create_message(
             chat_id=chat_id,
-            seq=next_seq,
-            role=role.value,
+            role=role,
             content=content,
+            seq=next_seq,
             request_id=UUID(client_msg_id) if client_msg_id else None,
         )
-
-        # Save to database
-        self.db.add(message)
-        await self.db.flush()  # Get ID without committing
-        await self.db.refresh(message)
 
         # Save to Redis cache
         await self._add_message_to_cache(chat_id, message)
 
         # Update chat metadata
-        await self.db.execute(
-            update(Chat).where(Chat.id == chat_id).values(
-                last_seq=next_seq,
-                last_active_at=message.created_at,
-            )
+        await self.chat_repo.update_last_activity(
+            chat_id=chat_id,
+            last_seq=next_seq,
+            last_active_at=message.created_at,
         )
 
         await self.db.commit()
@@ -330,8 +322,6 @@ class ChatService:
             "role": message.role,
             "content": message.content,
             "created_at": message.created_at.isoformat(),
-            "truncated": message.truncated,
-            "from_summary": message.from_summary,
         })
 
         # Add to sorted set by seq
@@ -351,9 +341,9 @@ class ChatService:
         )
 
     async def _build_context(self, chat_id: UUID, user_message: str) -> list[ChatMessage]:
-        """Build conversation context for LLM."""
-        # Get last 100 messages from Redis cache
-        cached_messages = await self.redis.zrange(f"chat:{chat_id}:messages", 0, -1)
+        """Build basic conversation context for LLM."""
+        # Get last 20 messages from Redis cache for context
+        cached_messages = await self.redis.zrange(f"chat:{chat_id}:messages", -20, -1)
 
         messages = []
         if cached_messages:
@@ -367,84 +357,32 @@ class ChatService:
                 except (json.JSONDecodeError, KeyError):
                     continue
 
-        # Add current user message
-        messages.append(ChatMessage(role="user", content=user_message))
-
-        # Add system message at the beginning
+        # Add basic system message (ConversationOrchestrator handles enhanced context)
         system_msg = ChatMessage(
             role="system",
-            content="You are a helpful AI assistant. Keep responses concise (max 500 words). If the response would be very long, consider splitting it into multiple messages.",
+            content="You are Aimi, a helpful AI assistant focused on helping users achieve their goals.",
         )
 
         return [system_msg] + messages
 
-    async def _process_goal_extraction(self, chat_id: UUID, user_message: str, user_id: UUID) -> None:
-        """Extract and process goals from user message using LLM."""
+    async def get_conversation_starter(self, chat_id: UUID, user_id: UUID) -> str:
+        """Get a personalized conversation starter for the chat."""
         try:
-            # Use a simple prompt to check if message contains goal intentions
-            goal_extraction_prompt = [
-                ChatMessage(
-                    role="system",
-                    content="""You are a goal extraction assistant. Analyze the user's message and determine if they are expressing a goal, intention, or something they want to achieve.
-
-If you detect a goal, respond with JSON in this format:
-{"has_goal": true, "title": "goal title", "description": "detailed description", "priority": 1-5, "needs_clarification": true/false, "clarification_questions": ["question1", "question2"]}
-
-If no goal is detected, respond with:
-{"has_goal": false}
-
-Examples of goals:
-- "I want to learn Python"
-- "I need to lose weight"
-- "I should start exercising"
-- "I'm planning to read more books"
-- "I want to improve my Spanish"
-
-Respond only with valid JSON."""
-                ),
-                ChatMessage(role="user", content=user_message)
-            ]
-
-            # Get goal extraction result
-            extraction_result = await self.llm_client.generate(goal_extraction_prompt)
-
-            try:
-                goal_data = json.loads(extraction_result)
-            except json.JSONDecodeError:
-                logger.warning(f"Failed to parse goal extraction result: {extraction_result}")
-                return
-
-            if not goal_data.get("has_goal", False):
-                return
-
-            # Create goal management tools instance
-            goal_tools = GoalManagementTools(self.db, user_id, chat_id)
-
-            # If goal needs clarification, we'll create it with basic info for now
-            # In a more advanced implementation, we could store pending goals and ask clarification
-            goal_result = await goal_tools.create_goal(
-                title=goal_data.get("title", "User Goal"),
-                description=goal_data.get("description"),
-                priority=goal_data.get("priority", 3),
+            orchestrator = ConversationOrchestrator(
+                db_session=self.db,
+                llm_client=self.llm_client,
+                user_id=user_id,
+                chat_id=chat_id
             )
-
-            if "error" not in goal_result:
-                logger.info(f"Auto-created goal '{goal_result['title']}' for user {user_id}")
-
-                # Optionally, we could break down the goal into tasks here
-                # For now, we'll just log the successful creation
-
+            return await orchestrator.get_conversation_starter()
         except Exception as e:
-            logger.error(f"Error in goal extraction: {e}")
-            # Don't fail the main chat flow if goal extraction fails
+            logger.error(f"Error getting conversation starter: {e}")
+            return "Hello! How can I help you achieve your goals today?"
 
     async def _send_push_notification(self, chat_id: UUID, content: str) -> None:
         """Send push notification (stub implementation)."""
         # Get chat info for notification
-        result = await self.db.execute(
-            select(Chat).where(Chat.id == chat_id)
-        )
-        chat = result.scalar_one_or_none()
+        chat = await self.chat_repo.get_by_id(chat_id)
 
         if not chat:
             return
@@ -471,8 +409,7 @@ Respond only with valid JSON."""
             "role": message.role,
             "content": message.content,
             "created_at": message.created_at.isoformat(),
-            "truncated": message.truncated,
-            "from_summary": message.from_summary,
+            "request_id": str(message.request_id) if message.request_id else None,
         }
 
 

@@ -1,160 +1,308 @@
-# Схема БД Aimi - Updated Chat System
+# Database Schema - Aimi Backend
+
+## Overview
+
+The Aimi backend uses PostgreSQL with a unified goals graph architecture. The schema includes support for users, chats, messages, goals with dependencies, events, notifications, and mental state tracking. All objectives are represented as goals in a directed acyclic graph.
 
 ## Core Tables
 
 ### users
-- `id UUID PRIMARY KEY`
-- `email TEXT`
-- `apple_id TEXT UNIQUE`
-- `display_name TEXT`
-- `role TEXT` (`user`, `admin`)
-- `is_active BOOLEAN`
-- `created_at TIMESTAMPTZ`
+User accounts and authentication.
 
-### chats
-- `id UUID PRIMARY KEY`
-- `user_id UUID REFERENCES users(id)`
-- `title TEXT` (nullable for default chats)
-- `model TEXT` (e.g., "gpt-4")
-- `settings JSONB` (temperature, system_prompt, etc.)
-- `last_seq INTEGER DEFAULT 0`
-- `last_active_at TIMESTAMPTZ`
-- `created_at TIMESTAMPTZ`
-- `archived BOOLEAN DEFAULT false`
+```sql
+users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(320) UNIQUE,
+    apple_id VARCHAR(255) UNIQUE,
+    display_name VARCHAR(255) NOT NULL,
+    role user_role NOT NULL DEFAULT 'user',
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+```
 
-### messages
-- `id UUID PRIMARY KEY`
-- `chat_id UUID REFERENCES chats(id)`
-- `seq INTEGER` (monotonic within chat)
-- `role TEXT` (`user`, `assistant`, `system`)
-- `content TEXT`
-- `created_at TIMESTAMPTZ`
-- `truncated BOOLEAN DEFAULT false`
-- `from_summary BOOLEAN DEFAULT false`
-- `request_id UUID` (for idempotency)
+**Enums:**
+- `user_role`: `user`, `admin`
 
 **Indexes:**
-- `(chat_id, seq)` - for message ordering
-- `(chat_id, created_at)` - for time-based queries
-- `(request_id)` - for duplicate detection
+- `ix_users_created_at` on `created_at`
 
-## user_state
-- `user_id UUID PRIMARY KEY REFERENCES users(id)`
-- `last_summary TEXT` (последняя свертка о пользователе)
-- `focus_goals JSONB` (активные цели, веса)
-- `traits JSONB` (предпочтения, стиль общения)
-- `recent_mood JSONB` (обобщенное состояние)
-- `updated_at TIMESTAMPTZ`
+### chats
+Chat conversations between users and assistant.
 
-## goals
-- `id UUID PRIMARY KEY`
-- `user_id UUID REFERENCES users(id)`
-- `title TEXT`
-- `description TEXT`
-- `status TEXT` (`active`, `paused`, `completed`, `archived`)
-- `target_date DATE NULL`
-- `priority SMALLINT`
-- `created_at TIMESTAMPTZ`
-- `updated_at TIMESTAMPTZ`
-- `metadata JSONB`
+```sql
+chats (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id),
+    title TEXT,
+    model VARCHAR(100) NOT NULL,
+    settings JSONB NOT NULL DEFAULT '{}',
+    last_seq INTEGER NOT NULL DEFAULT 0,
+    last_active_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    archived BOOLEAN NOT NULL DEFAULT false
+)
+```
 
-## habits
-- `id UUID PRIMARY KEY`
-- `user_id UUID REFERENCES users(id)`
-- `goal_id UUID REFERENCES goals(id)`
-- `name TEXT`
-- `frequency TEXT` (cron/rrule)
-- `intensity SMALLINT`
-- `created_at TIMESTAMPTZ`
-- `updated_at TIMESTAMPTZ`
-- `metadata JSONB`
+**Indexes:**
+- `ix_chats_user_id` on `user_id`
+- `ix_chats_last_active_at` on `last_active_at`
+- `ix_chats_created_at` on `created_at`
 
-## chat_messages
-- `id UUID PRIMARY KEY`
-- `user_id UUID REFERENCES users(id)`
-- `role TEXT` (`user`, `assistant`)
-- `text TEXT`
-- `occurred_at TIMESTAMPTZ`
-- `session_id UUID` (group messages в рамках сессии)
-- `metadata JSONB` (теги, sentiment, linked_task_id, etc.)
-- `created_at TIMESTAMPTZ`
+### messages
+Individual messages within chat conversations.
 
-## events
-- `id UUID PRIMARY KEY`
-- `user_id UUID REFERENCES users(id)`
-- `goal_id UUID REFERENCES goals(id) NULL`
-- `type TEXT` (`task`, `event`, `follow_up`, ...)
-- `title TEXT`
-- `description TEXT`
-- `status TEXT` (`planned`, `pending_confirmation`, `awaiting_feedback`, `completed`, `cancelled`)
-- `start_at TIMESTAMPTZ NULL`
-- `end_at TIMESTAMPTZ NULL`
-- `due_at TIMESTAMPTZ NULL` (для задач)
-- `priority SMALLINT`
-- `repeat_rule TEXT NULL` (rrule/cron)
-- `source TEXT` (`user`, `assistant`, `external`)
-- `created_at TIMESTAMPTZ`
-- `updated_at TIMESTAMPTZ`
-- `metadata JSONB`
+```sql
+messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    chat_id UUID NOT NULL REFERENCES chats(id),
+    seq INTEGER NOT NULL,
+    role messagerole NOT NULL,
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    truncated BOOLEAN NOT NULL DEFAULT false,
+    from_summary BOOLEAN NOT NULL DEFAULT false,
+    request_id UUID
+)
+```
 
-## reminder_queue
-- `id BIGSERIAL PRIMARY KEY`
-- `event_id UUID REFERENCES events(id)`
-- `trigger_at TIMESTAMPTZ`
-- `channel TEXT` (`push`, `email`, `assistant_message`)
-- `status TEXT` (`scheduled`, `sent`, `skipped`, `failed`)
-- `payload JSONB`
-- `created_at TIMESTAMPTZ`
-- `updated_at TIMESTAMPTZ`
+**Enums:**
+- `messagerole`: `user`, `assistant`, `system`
 
-## reminder_logs
-- `id BIGSERIAL PRIMARY KEY`
-- `queue_id BIGINT REFERENCES reminder_queue(id)`
-- `sent_at TIMESTAMPTZ`
-- `status TEXT`
-- `response JSONB`
+**Indexes:**
+- `ix_messages_chat_id_seq` on `(chat_id, seq)`
+- `ix_messages_chat_id_created_at` on `(chat_id, created_at)`
+- `ix_messages_request_id` on `request_id`
+- `ix_messages_created_at` on `created_at`
 
-## session_summary
-- `id UUID PRIMARY KEY`
-- `user_id UUID REFERENCES users(id)`
-- `session_id UUID`
-- `summary TEXT`
-- `facts JSONB` (Key-value facts extracted)
-- `created_at TIMESTAMPTZ`
+### goal_embeddings
+Vector embeddings of goals for semantic similarity search and duplicate detection.
 
-## memory_vectors
-- `id UUID PRIMARY KEY`
-- `user_id UUID REFERENCES users(id)`
-- `entity_type TEXT` (`goal`, `event`, `experience`, `summary`)
-- `entity_id UUID NULL`
-- `content TEXT`
-- `embedding VECTOR` (PGVector) или `vector(1536)`
-- `metadata JSONB`
-- `is_active BOOLEAN DEFAULT true`
-- `created_at TIMESTAMPTZ`
+```sql
+goal_embeddings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    goal_id UUID NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+    embedding VECTOR(1536) NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+```
 
-## task_history / event_history (опционально)
-- `id BIGSERIAL PRIMARY KEY`
-- `entity_id UUID`
-- `entity_type TEXT` (`task`, `event`)
-- `from_status TEXT`
-- `to_status TEXT`
-- `changed_at TIMESTAMPTZ`
-- `metadata JSONB`
+**Indexes:**
+- `ix_goal_embeddings_goal_id` on `goal_id`
+- `ix_goal_embeddings_created_at` on `created_at`
+- `ix_goal_embeddings_content_hash` on `content_hash`
 
-### Вспомогательные таблицы (при необходимости)
-- `user_settings`, `integrations`, `external_calendar_tokens`
-- `session_cache` (если хотим хранить кеш сессий в базе)
+### devices
+User devices for push notifications.
 
-### Индексы и связи
-- Основные индексы:
-  - `chat_messages` по (`user_id`, `session_id`, `occurred_at DESC`)
-  - `events` по (`user_id`, `status`, `start_at / due_at`)
-  - `reminder_queue` по (`trigger_at`, `status`)
-  - `memory_vectors` по `user_id` и векторный индекс (ivfflat/hnsw)
+```sql
+devices (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id),
+    device_token VARCHAR(255) NOT NULL,
+    platform VARCHAR(20) NOT NULL,
+    locale VARCHAR(10),
+    timezone VARCHAR(50),
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    last_seen TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+```
 
-### Потоки данных
-1. Сообщения → `chat_messages` (+ кеш).
-2. При завершении сессии → `session_summary` + `memory_vectors`.
-3. Создание целей/задач/событий → таблица `events` и связи `goal_id`/`metadata`.
-4. Планирование напоминаний → `reminder_queue` → воркер → `reminder_logs`.
+**Indexes:**
+- `ix_devices_user_id` on `user_id`
+- `ix_devices_device_token` on `device_token`
+- `ix_devices_last_seen` on `last_seen`
+
+## Goal Management System
+
+### goals
+User objectives in a unified goal graph. All objectives are goals regardless of complexity.
+
+```sql
+goals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    chat_id UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    description TEXT,
+    category goalcategory,
+    status goalstatus NOT NULL DEFAULT 'todo',
+    priority INTEGER NOT NULL DEFAULT 3,
+    estimated_duration_days INTEGER,
+    deadline DATE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+```
+
+**Enums:**
+- `goalstatus`: `todo`, `blocked`, `done`, `canceled`
+- `goalcategory`: `career`, `health`, `learning`, `finance`, `personal`, `social`, `creative`
+
+**Constraints:**
+- `valid_priority`: `priority BETWEEN 1 AND 5`
+
+**Indexes:**
+- `ix_goals_user_id` on `user_id`
+- `ix_goals_chat_id` on `chat_id`
+- `ix_goals_status` on `status`
+- `ix_goals_deadline` on `deadline`
+
+
+### goal_dependencies
+Graph relationships between goals with validation for DAG structure.
+
+```sql
+goal_dependencies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    parent_goal_id UUID NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+    dependent_goal_id UUID NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+    dependency_type dependencytype NOT NULL DEFAULT 'requires',
+    strength INTEGER NOT NULL DEFAULT 1,
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT no_self_dependency CHECK (parent_goal_id != dependent_goal_id),
+    CONSTRAINT valid_strength CHECK (strength BETWEEN 1 AND 5),
+    CONSTRAINT unique_dependency UNIQUE (parent_goal_id, dependent_goal_id)
+)
+```
+
+**Enums:**
+- `dependencytype`: `requires`, `enables`, `blocks`, `related`, `parallel`
+
+**Indexes:**
+- `ix_goal_dependencies_parent_goal_id` on `parent_goal_id`
+- `ix_goal_dependencies_dependent_goal_id` on `dependent_goal_id`
+
+**Graph Rules:**
+- No cycles allowed (DAG constraint)
+- No transitive dependencies (A→C forbidden if A→B→C exists)
+- AND logic: goals become `todo` only when ALL dependencies are `done`
+
+
+## Events and Notifications
+
+### events
+Calendar events and scheduled activities.
+
+```sql
+events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    goal_id UUID REFERENCES goals(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    location TEXT,
+    event_type eventtype NOT NULL DEFAULT 'personal',
+    start_time TIMESTAMPTZ NOT NULL,
+    end_time TIMESTAMPTZ,
+    status eventstatus NOT NULL DEFAULT 'scheduled',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+```
+
+**Enums:**
+- `eventtype`: `work`, `meeting`, `break`, `focus_time`, `deadline`, `personal`
+- `eventstatus`: `scheduled`, `completed`, `cancelled`, `in_progress`
+
+**Indexes:**
+- `ix_events_user_id` on `user_id`
+- `ix_events_goal_id` on `goal_id`
+- `ix_events_start_time` on `start_time`
+- `ix_events_status` on `status`
+
+### notifications
+Smart notifications sent as assistant messages.
+
+```sql
+notifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    chat_id UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    goal_id UUID REFERENCES goals(id) ON DELETE SET NULL,
+    message TEXT NOT NULL,
+    notification_type notificationtype NOT NULL,
+    scheduled_for TIMESTAMPTZ NOT NULL,
+    status notificationstatus NOT NULL DEFAULT 'pending',
+    sent_at TIMESTAMPTZ,
+    context JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+```
+
+**Enums:**
+- `notificationtype`: `motivation`, `rest_suggestion`, `progress_check`, `goal_reminder`, `celebration`, `planning`
+- `notificationstatus`: `pending`, `sent`, `dismissed`
+
+**Indexes:**
+- `ix_notifications_user_id` on `user_id`
+- `ix_notifications_chat_id` on `chat_id`
+- `ix_notifications_scheduled_for` on `scheduled_for`
+- `ix_notifications_status` on `status`
+- `ix_notifications_type` on `notification_type`
+
+## Analytics
+
+### mental_states
+User mental state analysis from conversations.
+
+```sql
+mental_states (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    chat_id UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    mood VARCHAR(50),
+    energy_level INTEGER,
+    confidence_level INTEGER,
+    detected_emotions TEXT[],
+    context TEXT,
+    analysis_source VARCHAR(20) NOT NULL DEFAULT 'summary',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)
+```
+
+## Relationships Overview
+
+### User Domain
+- `User` 1:N `Chat`
+- `User` 1:N `Goal`
+- `User` 1:N `Event`
+- `User` 1:N `MentalState`
+- `User` 1:N `Notification`
+
+### Chat Domain
+- `Chat` 1:N `Message`
+- `Chat` 1:N `Goal`
+- `Chat` 1:N `MentalState`
+- `Chat` 1:N `Notification`
+
+### Goal Domain
+- `Goal` N:M `Goal` (via `goal_dependencies`)
+- `Goal` 1:1 `GoalEmbedding`
+- `Goal` 1:N `Event`
+- `Goal` 1:N `Notification`
+
+## Graph Operations
+
+The unified goals graph supports operations for:
+
+1. **Dependency Resolution**: Finding all prerequisites for any goal
+2. **Impact Analysis**: Finding all goals that depend on a specific goal
+3. **Status Propagation**: Automatically updating goal status based on dependencies
+4. **Cycle Detection**: Preventing circular dependencies during creation
+5. **Transitive Reduction**: Validating direct dependencies aren't redundant
+6. **Similarity Search**: Finding duplicate or related goals using embeddings
+7. **Critical Path**: Identifying bottlenecks in goal achievement chains
+
+## Migration Notes
+
+The schema uses PostgreSQL native enums for type safety and performance, with corresponding Python enums for application-level validation.
+
+Vector embeddings use the `pgvector` extension for semantic similarity search and duplicate goal detection.
+
+All timestamps are stored with timezone information (`TIMESTAMPTZ`).
+
+The unified goals graph replaces the previous goals/tasks separation with a single flexible hierarchy.

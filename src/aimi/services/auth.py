@@ -70,7 +70,7 @@ class AuthService:
             email=user.email,
             display_name=user.display_name,
             is_active=user.is_active,
-            role=user.role.value,
+            role=user.role,
             created_at=_ensure_datetime(user.created_at),
             tokens=TokenPair(access_token=access, refresh_token=refresh),
         )
@@ -98,7 +98,7 @@ class AuthService:
             email=user.email,
             display_name=user.display_name,
             is_active=user.is_active,
-            role=user.role.value,
+            role=user.role,
             created_at=_ensure_datetime(user.created_at),
             tokens=TokenPair(access_token=access, refresh_token=refresh),
         )

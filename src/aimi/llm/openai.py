@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from typing import Any, Dict, List
 
 from openai import AsyncOpenAI, OpenAIError
 
@@ -67,6 +68,65 @@ class OpenAIChatClient(LLMClient):
             )
 
         return text
+
+    async def generate_with_tools(
+        self,
+        messages: List[ChatMessage],
+        tools: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Generate response with function calling support."""
+        if not messages:
+            raise ServiceError(
+                code="llm.missing_messages",
+                message="No messages provided for generation.",
+            )
+
+        payload = [
+            {"role": message.role, "content": message.content} for message in messages
+        ]
+
+        try:
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                messages=payload,
+                tools=tools,
+                tool_choice="auto" if tools else None,
+            )
+        except OpenAIError as exc:  # pragma: no cover - depends on external service
+            raise ServiceError(
+                code="llm.request_failed",
+                message="Failed to obtain response from OpenAI.",
+                details={"error": str(exc)},
+            ) from exc
+
+        choice = response.choices[0]
+        message = choice.message
+
+        result = {
+            "content": message.content or "",
+            "tool_calls": []
+        }
+
+        # Process tool calls if any
+        if message.tool_calls:
+            tool_calls = []
+            for tool_call in message.tool_calls:
+                if tool_call.type == "function":
+                    function = tool_call.function
+                    try:
+                        arguments = json.loads(function.arguments)
+                    except json.JSONDecodeError:
+                        arguments = {}
+
+                    tool_calls.append({
+                        "id": tool_call.id,
+                        "name": function.name,
+                        "arguments": arguments
+                    })
+
+            result["tool_calls"] = tool_calls
+
+        return result
 
 
 def _extract_text(segment: Any) -> str:

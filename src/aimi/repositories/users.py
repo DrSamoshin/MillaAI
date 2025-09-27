@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aimi.db.models import User, UserRole
+from aimi.db.models import Event, Goal, User, UserRole
 import logging
 
 
@@ -35,7 +35,7 @@ class UserRepository:
             email=email,
             apple_id=apple_id,
             display_name=display_name,
-            role=role_enum,
+            role=role_enum.value,
         )
         self._session.add(user)
         await self._session.flush()
@@ -45,7 +45,7 @@ class UserRepository:
                 "user_id": str(user.id),
                 "email": user.email,
                 "apple_id": user.apple_id,
-                "role": user.role.value,
+                "role": user.role,
             },
         )
         return user
@@ -73,6 +73,79 @@ class UserRepository:
         """Remove user record."""
 
         await self._session.delete(user)
+
+    async def get_goal_stats(self, user_id: uuid.UUID) -> dict:
+        """Get goal statistics for user."""
+
+        # Total goals
+        total_stmt = select(func.count(Goal.id)).where(Goal.user_id == user_id)
+        total_result = await self._session.execute(total_stmt)
+        total = total_result.scalar() or 0
+
+        # Goals by status
+        status_stmt = select(Goal.status, func.count(Goal.id)).where(
+            Goal.user_id == user_id
+        ).group_by(Goal.status)
+        status_result = await self._session.execute(status_stmt)
+        by_status = dict(status_result.fetchall())
+
+        # Goals by category
+        category_stmt = select(Goal.category, func.count(Goal.id)).where(
+            Goal.user_id == user_id,
+            Goal.category.is_not(None)
+        ).group_by(Goal.category)
+        category_result = await self._session.execute(category_stmt)
+        by_category = dict(category_result.fetchall())
+
+        return {
+            "total": total,
+            "by_status": by_status,
+            "by_category": by_category
+        }
+
+    async def update_availability(
+        self,
+        user_id: uuid.UUID,
+        **update_data
+    ) -> None:
+        """Update user availability settings."""
+        user = await self.get_by_id(user_id)
+        if not user:
+            raise ValueError(f"User {user_id} not found")
+
+        for field, value in update_data.items():
+            if hasattr(user, field):
+                setattr(user, field, value)
+
+        await self._session.flush()
+
+    async def get_event_stats(self, user_id: uuid.UUID) -> dict:
+        """Get event statistics for user."""
+
+        # Total events
+        total_stmt = select(func.count(Event.id)).where(Event.user_id == user_id)
+        total_result = await self._session.execute(total_stmt)
+        total = total_result.scalar() or 0
+
+        # Events by type
+        type_stmt = select(Event.event_type, func.count(Event.id)).where(
+            Event.user_id == user_id
+        ).group_by(Event.event_type)
+        type_result = await self._session.execute(type_stmt)
+        by_type = dict(type_result.fetchall())
+
+        # Events by status
+        status_stmt = select(Event.status, func.count(Event.id)).where(
+            Event.user_id == user_id
+        ).group_by(Event.status)
+        status_result = await self._session.execute(status_stmt)
+        by_status = dict(status_result.fetchall())
+
+        return {
+            "total": total,
+            "by_type": by_type,
+            "by_status": by_status
+        }
 
 
 __all__ = ["UserRepository"]

@@ -31,7 +31,7 @@ class EventRepository:
         end_time: datetime,
         description: str | None = None,
         location: str | None = None,
-        event_type: EventType = EventType.PERSONAL,
+        event_type: str = EventType.PERSONAL.value,
         goal_id: uuid.UUID | None = None,
     ) -> Event:
         """Create new event."""
@@ -41,7 +41,6 @@ class EventRepository:
             description=description,
             location=location,
             event_type=event_type,
-            status=EventStatus.SCHEDULED.value,
             start_time=start_time,
             end_time=end_time,
             goal_id=goal_id,
@@ -92,7 +91,7 @@ class EventRepository:
             .where(
                 Event.user_id == user_id,
                 Event.start_time >= now,
-                Event.status == EventStatus.SCHEDULED
+                Event.status == EventStatus.SCHEDULED.value
             )
             .order_by(Event.start_time.asc())
             .limit(limit)

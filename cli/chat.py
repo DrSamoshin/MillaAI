@@ -44,42 +44,122 @@ async def chat_loop(token: str, chat_id: str) -> None:
                     continue
 
                 # Send message in new JSON format
+                request_id = str(uuid.uuid4())
                 message_data = {
                     "content": message,
-                    "client_msg_id": str(uuid.uuid4())
+                    "client_msg_id": request_id
                 }
                 await websocket.send(json.dumps(message_data))
 
-                try:
-                    response = await websocket.recv()
-                except ConnectionClosed as exc:
-                    print(f"Connection closed (code={exc.code}, reason={exc.reason}).")
-                    break
+                # Receive all messages for this request_id
+                assistant_message_received = False
+                while not assistant_message_received:
+                    try:
+                        response = await websocket.recv()
+                    except ConnectionClosed as exc:
+                        print(f"Connection closed (code={exc.code}, reason={exc.reason}).")
+                        break
 
-                payload = json.loads(response)
-
-                # Handle thinking message
-                if payload.get("status") == "thinking":
-                    print(f"[thinking] {payload.get('message', 'Processing...')}")
-                    # Wait for actual response
-                    response = await websocket.recv()
                     payload = json.loads(response)
 
-                # Debug: show what we received
-                print(f"[DEBUG] Received: {payload}")
+                    # Check if this message belongs to our request
+                    message_request_id = payload.get("request_id")
+                    if message_request_id != request_id:
+                        # This message is from a different request, skip it or handle separately
+                        print(f"[DEBUG] Received message with different request_id: {message_request_id} vs {request_id}")
+                        continue
 
-                # Handle response
-                if "error" in payload:
-                    error_detail = payload.get("error", {})
-                    if isinstance(error_detail, dict):
-                        print(f"[error] {error_detail.get('message', 'Unknown error')}")
+                    # Handle each message separately (WebSocket format)
+                    if "role" in payload and "content" in payload:
+                        role = payload["role"]
+                        content = payload["content"]
+                        seq = payload.get("seq", "?")
+                        msg_id = payload.get("id", "unknown")
+                        created_at = payload.get("created_at", "")
+
+                        # Parse timestamp for display
+                        timestamp = ""
+                        if created_at:
+                            try:
+                                from datetime import datetime
+                                dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                                timestamp = dt.strftime("%H:%M:%S")
+                            except:
+                                timestamp = created_at[:19] if len(created_at) >= 19 else created_at
+
+                        if role == "user":
+                            print(f"\033[33m[{timestamp}] You (#{seq}): {content}\033[0m")  # Yellow
+                        elif role == "system":
+                            # Parse system message content for tool info
+                            try:
+                                system_data = json.loads(content)
+                                tool_calls = system_data.get("tool_calls", [])
+                                tool_results = system_data.get("tool_results", [])
+
+                                if tool_calls or tool_results:
+                                    print(f"\033[31m[{timestamp}] System (#{seq}): Tool execution\033[0m")  # Red
+
+                                    if tool_calls:
+                                        print(f"\033[31m  Tool calls: {len(tool_calls)} functions\033[0m")
+                                        for call in tool_calls:
+                                            args = call.get('arguments', {})
+                                            # Format args more compactly for CLI
+                                            if isinstance(args, dict) and len(args) == 1:
+                                                # Single argument - show inline
+                                                key, value = next(iter(args.items()))
+                                                args_str = f"{key}={json.dumps(value)}"
+                                            else:
+                                                args_str = json.dumps(args)
+                                            print(f"\033[31m    {call.get('name', 'unknown')}({args_str})\033[0m")
+
+                                    if tool_results:
+                                        print(f"\033[31m  Tool results: {len(tool_results)} responses\033[0m")
+                                        for i, result in enumerate(tool_results):
+                                            result_data = result.get('result', {})
+                                            if isinstance(result_data, dict):
+                                                if result_data.get('error'):
+                                                    print(f"\033[31m    Result {i+1}: Error - {result_data['error']}\033[0m")
+                                                elif result_data.get('success_message'):
+                                                    print(f"\033[31m    Result {i+1}: {result_data['success_message']}\033[0m")
+                                                else:
+                                                    # Show full result data formatted nicely
+                                                    formatted_result = json.dumps(result_data, indent=2, ensure_ascii=False)
+                                                    print(f"\033[31m    Result {i+1}:\033[0m")
+                                                    # Indent each line of the JSON
+                                                    for line in formatted_result.split('\n'):
+                                                        print(f"\033[31m      {line}\033[0m")
+                                            else:
+                                                print(f"\033[31m    Result {i+1}: {str(result_data)}\033[0m")
+                                else:
+                                    # System message without tools
+                                    print(f"\033[31m[{timestamp}] System (#{seq}): {content}\033[0m")
+                            except json.JSONDecodeError:
+                                # Non-JSON system message
+                                print(f"\033[31m[{timestamp}] System (#{seq}): {content}\033[0m")
+
+                        elif role == "assistant" and '"tool_calls"' in content:
+                            print(f"\033[35m[{timestamp}] Tool (#{seq}): {content}\033[0m")  # Magenta
+                            # Don't exit - wait for final assistant message
+
+                        elif role == "assistant":
+                            print(f"\033[34m[{timestamp}] Aimi (#{seq}): {content}\033[0m")  # Blue
+                            assistant_message_received = True  # Exit loop after assistant message
+
+                        else:
+                            print(f"\033[90m[{timestamp}] [{role.upper()}] (#{seq}): {content}\033[0m")
+
+                    # Handle old error format for backward compatibility
+                    elif "error" in payload:
+                        error_detail = payload.get("error", {})
+                        if isinstance(error_detail, dict):
+                            print(f"[error] {error_detail.get('message', 'Unknown error')}")
+                        else:
+                            print(f"[error] {error_detail}")
+                        assistant_message_received = True  # Exit on error
+
                     else:
-                        print(f"[error] {error_detail}")
-                elif payload.get("status") == "success" and "data" in payload:
-                    data = payload["data"]
-                    print(f"Aimi: {data['assistant_message']['content']}")
-                else:
-                    print(f"[unknown] {payload}")
+                        print(f"[unknown] {payload}")
+                        assistant_message_received = True  # Exit on unknown format
 
         finally:
             await asyncio.sleep(1)

@@ -53,6 +53,17 @@ class AppSettings(BaseSettings):
     openai_model: Annotated[
         str, Field(default="gpt-4o-mini", description="Default OpenAI chat model")
     ]
+    llm_context_message_limit: Annotated[
+        int, Field(default=20, description="Number of messages for LLM context history")
+    ]
+
+    # Prompt configuration
+    prompt_include_examples: Annotated[
+        bool, Field(default=False, description="Include behavioral examples in system prompt")
+    ]
+    prompt_include_tools_list: Annotated[
+        bool, Field(default=True, description="Include tools documentation in system prompt")
+    ]
 
     jwt_secret: Annotated[
         str,

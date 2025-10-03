@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from aimi.api.v1.deps import get_auth_service, get_db_session
+from aimi.api.v1.deps import get_auth_service, get_uow_dependency
+from aimi.db.session import UnitOfWork
 from aimi.api.v1.schemas import SuccessResponse
 from aimi.api.v1.schemas.auth import (
     AppleSignInRequest,
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 @router.post("/apple-signin/", response_model=SuccessResponse[AuthResponsePayload])
 async def apple_sign_in(
     payload: AppleSignInRequest,
-    session: AsyncSession = Depends(get_db_session),
+    uow: UnitOfWork = Depends(get_uow_dependency),
     service: AuthService = Depends(get_auth_service),
 ) -> SuccessResponse[AuthResponsePayload]:
     # identity_token verification TBD when Apple credentials added
@@ -43,7 +43,7 @@ async def apple_sign_in(
     )
 
     result = await service.apple_sign_in(
-        session=session,
+        uow=uow,
         apple_id=payload.apple_id,
         name=payload.name,
         email=payload.email,
@@ -71,7 +71,7 @@ async def apple_sign_in(
 @router.post("/refresh/", response_model=SuccessResponse[RefreshResponsePayload])
 async def refresh_tokens(
     payload: RefreshRequest,
-    session: AsyncSession = Depends(get_db_session),
+    uow: UnitOfWork = Depends(get_uow_dependency),
     service: AuthService = Depends(get_auth_service),
 ) -> SuccessResponse[RefreshResponsePayload]:
     token = payload.refresh_token
@@ -83,7 +83,7 @@ async def refresh_tokens(
     logger.info("refresh_token_requested")
 
     try:
-        result = await service.refresh_tokens(token=token, session=session)
+        result = await service.refresh_tokens(token=token, uow=uow)
     except Exception as exc:  # pragma: no cover - error path
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from aimi.core.config import AppSettings, get_settings
+from aimi.db.uow import UnitOfWork
 
 
 @lru_cache
@@ -43,11 +44,28 @@ async def session_scope() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
-async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency that yields an async session."""
+
+@asynccontextmanager
+async def get_unit_of_work() -> AsyncGenerator[UnitOfWork, None]:
+    """Provide a Unit of Work context manager."""
 
     async with session_scope() as session:
-        yield session
+        uow = UnitOfWork(session)
+        yield uow
 
 
-__all__ = ["get_engine", "get_session_factory", "session_scope", "get_db_session"]
+async def get_uow_dependency() -> AsyncGenerator[UnitOfWork, None]:
+    """FastAPI dependency that yields a Unit of Work."""
+
+    async with get_unit_of_work() as uow:
+        yield uow
+
+
+__all__ = [
+    "get_engine",
+    "get_session_factory",
+    "session_scope",
+    "get_unit_of_work",
+    "get_uow_dependency",
+    "UnitOfWork"
+]

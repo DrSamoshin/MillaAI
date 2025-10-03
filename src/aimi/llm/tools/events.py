@@ -7,12 +7,8 @@ from datetime import datetime
 from typing import Any, Dict
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-
-from aimi.db.models.enums import EventStatus
-from aimi.db.models.event import Event
-from aimi.db.models.goal import Goal
+from aimi.db.session import UnitOfWork
+from aimi.db.models.enums import EventStatus, EventType
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +16,8 @@ logger = logging.getLogger(__name__)
 class EventTools:
     """Tools for LLM to manage user events."""
 
-    def __init__(self, db_session: AsyncSession, user_id: UUID, chat_id: UUID):
-        self.db = db_session
+    def __init__(self, uow: UnitOfWork, user_id: UUID, chat_id: UUID):
+        self.uow = uow
         self.user_id = user_id
         self.chat_id = chat_id
 
@@ -55,26 +51,22 @@ class EventTools:
                     return {"error": "End time must be after start time"}
 
             # Validate event type
-            valid_types = {"work", "meeting", "break", "focus_time", "deadline", "personal"}
-            if event_type not in valid_types:
+            try:
+                event_type_enum = EventType(event_type)
+            except ValueError:
+                valid_types = [e.value for e in EventType]
                 return {"error": f"Invalid event_type: {event_type}. Must be one of {valid_types}"}
 
-            # Create event
-            event = Event(
+            # Create event using repository
+            event = await self.uow.events().create_event(
                 user_id=self.user_id,
                 title=title,
                 description=description,
-                location=location,
                 event_type=event_type,
-                status=EventStatus.SCHEDULED.value,
                 start_time=start_time_dt,
                 end_time=end_time_dt,
+                location=location,
             )
-
-            self.db.add(event)
-            await self.db.flush()
-            await self.db.refresh(event)
-            await self.db.commit()
 
             logger.info(f"Created event '{title}' for user {self.user_id}")
 
@@ -83,10 +75,10 @@ class EventTools:
                 "title": event.title,
                 "description": event.description,
                 "location": event.location,
-                "event_type": event.event_type,
+                "event_type": event.event_type.value,
                 "start_time": event.start_time.isoformat(),
                 "end_time": event.end_time.isoformat() if event.end_time else None,
-                "status": event.status,
+                "status": event.status.value,
                 "created_at": event.created_at.isoformat(),
             }
 
@@ -98,32 +90,17 @@ class EventTools:
         """Connect an event to a goal."""
         try:
             # Verify event exists and belongs to user
-            event_result = await self.db.execute(
-                select(Event).where(
-                    Event.id == UUID(event_id),
-                    Event.user_id == self.user_id
-                )
-            )
-            event = event_result.scalar_one_or_none()
-
-            if not event:
+            event = await self.uow.events().get_by_id(UUID(event_id))
+            if not event or event.user_id != self.user_id:
                 return {"error": f"Event {event_id} not found or not owned by user"}
 
             # Verify goal exists and belongs to user
-            goal_result = await self.db.execute(
-                select(Goal).where(
-                    Goal.id == UUID(goal_id),
-                    Goal.user_id == self.user_id
-                )
-            )
-            goal = goal_result.scalar_one_or_none()
-
-            if not goal:
+            goal = await self.uow.goals().get_by_id(UUID(goal_id))
+            if not goal or goal.user_id != self.user_id:
                 return {"error": f"Goal {goal_id} not found or not owned by user"}
 
             # Link event to goal
-            event.goal_id = UUID(goal_id)
-            await self.db.commit()
+            await self.uow.events().update_event(event, goal_id=UUID(goal_id))
 
             logger.info(f"Linked event '{event.title}' to goal '{goal.title}'")
 
@@ -138,54 +115,6 @@ class EventTools:
             logger.error(f"Failed to link event to goal: {e}")
             return {"error": f"Failed to link event to goal: {str(e)}"}
 
-    async def link_event_to_task(self, event_id: str, task_id: str) -> Dict[str, Any]:
-        """Connect an event to a task."""
-        try:
-            # Verify event exists and belongs to user
-            event_result = await self.db.execute(
-                select(Event).where(
-                    Event.id == UUID(event_id),
-                    Event.user_id == self.user_id
-                )
-            )
-            event = event_result.scalar_one_or_none()
-
-            if not event:
-                return {"error": f"Event {event_id} not found or not owned by user"}
-
-            # Verify task exists and belongs to user (through goal)
-            task_result = await self.db.execute(
-                select(Task, Goal.title.label("goal_title"))
-                .join(Goal)
-                .where(
-                    Task.id == UUID(task_id),
-                    Goal.user_id == self.user_id
-                )
-            )
-            task_data = task_result.first()
-
-            if not task_data:
-                return {"error": f"Task {task_id} not found or not owned by user"}
-
-            task, goal_title = task_data
-
-            # Link event to task
-            event.task_id = UUID(task_id)
-            await self.db.commit()
-
-            logger.info(f"Linked event '{event.title}' to task '{task.title}'")
-
-            return {
-                "event_id": str(event.id),
-                "task_id": str(task.id),
-                "event_title": event.title,
-                "task_title": task.title,
-                "goal_title": goal_title,
-            }
-
-        except Exception as e:
-            logger.error(f"Failed to link event to task: {e}")
-            return {"error": f"Failed to link event to task: {str(e)}"}
 
     async def update_event_status(self, event_id: str, status: str) -> Dict[str, Any]:
         """Update event status."""
@@ -196,26 +125,19 @@ class EventTools:
                 return {"error": f"Invalid status: {status}. Must be one of {valid_statuses}"}
 
             # Find event
-            result = await self.db.execute(
-                select(Event).where(
-                    Event.id == UUID(event_id),
-                    Event.user_id == self.user_id
-                )
-            )
-            event = result.scalar_one_or_none()
-
-            if not event:
+            event = await self.uow.events().get_by_id(UUID(event_id))
+            if not event or event.user_id != self.user_id:
                 return {"error": f"Event {event_id} not found or not owned by user"}
 
-            event.status = EventStatus(status)
-            await self.db.commit()
+            # Update event status
+            await self.uow.events().update_event(event, status=EventStatus(status).value)
 
             logger.info(f"Updated event '{event.title}' status to '{status}'")
 
             return {
                 "event_id": str(event.id),
                 "title": event.title,
-                "status": event.status,
+                "status": event.status.value,
             }
 
         except Exception as e:
@@ -227,34 +149,24 @@ class EventTools:
         try:
             now = datetime.utcnow()
 
-            result = await self.db.execute(
-                select(Event, Goal.title.label("goal_title"), Task.title.label("task_title"))
-                .outerjoin(Goal, Event.goal_id == Goal.id)
-                .outerjoin(Task, Event.task_id == Task.id)
-                .where(
-                    Event.user_id == self.user_id,
-                    Event.start_time >= now,
-                    Event.status == EventStatus.SCHEDULED
-                )
-                .order_by(Event.start_time.asc())
-                .limit(limit)
+            # Get upcoming events using repository
+            events = await self.uow.events().get_upcoming_events(
+                user_id=self.user_id,
+                limit=limit
             )
 
             events_data = []
-            for event, goal_title, task_title in result.all():
+            for event in events:
                 events_data.append({
                     "event_id": str(event.id),
                     "title": event.title,
                     "description": event.description,
                     "location": event.location,
-                    "event_type": event.event_type,
+                    "event_type": event.event_type.value,
                     "start_time": event.start_time.isoformat(),
                     "end_time": event.end_time.isoformat() if event.end_time else None,
-                    "status": event.status,
+                    "status": event.status.value,
                     "goal_id": str(event.goal_id) if event.goal_id else None,
-                    "goal_title": goal_title,
-                    "task_id": str(event.task_id) if event.task_id else None,
-                    "task_title": task_title,
                 })
 
             return {
@@ -283,7 +195,7 @@ class EventTools:
                     return {"error": f"Invalid status: {status}. Must be one of {valid_statuses}"}
 
             # Get events using repository
-            events = await self.repo.get_user_events(
+            events = await self.uow.events().get_user_events(
                 user_id=self.user_id,
                 status=status_enum,
                 limit=limit
@@ -294,7 +206,7 @@ class EventTools:
                 # Get goal title if linked
                 goal_title = None
                 if event.goal_id:
-                    goal = await self.goal_repo.get_by_id(event.goal_id)
+                    goal = await self.uow.goals().get_by_id(event.goal_id)
                     if goal:
                         goal_title = goal.title
 
@@ -303,10 +215,10 @@ class EventTools:
                     "title": event.title,
                     "description": event.description,
                     "location": event.location,
-                    "event_type": event.event_type,
+                    "event_type": event.event_type.value,
                     "start_time": event.start_time.isoformat(),
                     "end_time": event.end_time.isoformat(),
-                    "status": event.status,
+                    "status": event.status.value,
                     "goal_id": str(event.goal_id) if event.goal_id else None,
                     "goal_title": goal_title,
                     "created_at": event.created_at.isoformat(),

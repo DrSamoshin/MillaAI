@@ -8,13 +8,13 @@ import logging
 from typing import Any, Callable, Dict, List
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from aimi.db.session import UnitOfWork
+from aimi.db.models.enums import GoalStatus, GoalCategory, DependencyType
 from .goals import GoalTools
 from .events import EventTools
 from .notifications import NotificationTools
 from .mental_states import MentalStateTools
-from .datetime_utils import DateTimeTools
+from .helpers import GoalAnalysisHelpers
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +22,17 @@ logger = logging.getLogger(__name__)
 class LLMToolRegistry:
     """Registry for LLM-callable tools with function calling support."""
 
-    def __init__(self, db_session: AsyncSession, user_id: UUID, chat_id: UUID):
-        self.db_session = db_session
+    def __init__(self, uow: UnitOfWork, user_id: UUID, chat_id: UUID):
+        self.uow = uow
         self.user_id = user_id
         self.chat_id = chat_id
 
         # Initialize tool instances
-        self.goal_tools = GoalTools(db_session, user_id, chat_id)
-        self.event_tools = EventTools(db_session, user_id, chat_id)
-        self.notification_tools = NotificationTools(db_session, user_id, chat_id)
-        self.mental_state_tools = MentalStateTools(db_session, user_id, chat_id)
-        self.datetime_tools = DateTimeTools()
+        self.goal_tools = GoalTools(uow, user_id, chat_id)
+        self.event_tools = EventTools(uow, user_id, chat_id)
+        self.notification_tools = NotificationTools(uow, user_id, chat_id)
+        self.mental_state_tools = MentalStateTools(uow, user_id, chat_id)
+        self.goal_analysis_helpers = GoalAnalysisHelpers()
 
         # Register all available tools
         self._tools: Dict[str, Dict[str, Any]] = {}
@@ -70,8 +70,8 @@ class LLMToolRegistry:
                             },
                             "category": {
                                 "type": "string",
-                                "description": "Goal category",
-                                "enum": ["career", "health", "learning", "finance", "personal", "social", "creative"]
+                                "description": "Goal category: career (work/professional), health (fitness/wellness), learning (education/skills), finance (money/savings), personal (self-improvement), social (relationships), creative (art/hobbies)",
+                                "enum": [e.value for e in GoalCategory]
                             },
                             "deadline": {
                                 "type": "string",
@@ -88,9 +88,17 @@ class LLMToolRegistry:
                                 "description": "Difficulty level from 0 (very easy) to 10 (very hard)",
                                 "minimum": 0,
                                 "maximum": 10
+                            },
+                            "motivation": {
+                                "type": "string",
+                                "description": "Why this goal is important to the user"
+                            },
+                            "success_criteria": {
+                                "type": "string",
+                                "description": "How to measure success for this goal"
                             }
                         },
-                        "required": ["title"]
+                        "required": ["title", "category"]
                     }
                 }
             }
@@ -113,12 +121,8 @@ class LLMToolRegistry:
                             },
                             "status": {
                                 "type": "string",
-                                "description": "New goal status",
-                                "enum": ["todo", "done", "canceled"]
-                            },
-                            "notes": {
-                                "type": "string",
-                                "description": "Optional notes about the status change"
+                                "description": "New goal status: todo (not started), blocked (waiting for dependencies), done (completed), canceled (abandoned)",
+                                "enum": [e.value for e in GoalStatus]
                             }
                         },
                         "required": ["goal_id", "status"]
@@ -140,26 +144,22 @@ class LLMToolRegistry:
                         "properties": {
                             "parent_goal_id": {
                                 "type": "string",
-                                "description": "ID of the goal that must be completed first"
+                                "description": "UUID of the parent goal (must be obtained from get_user_goals or get_available_goals response)"
                             },
                             "dependent_goal_id": {
                                 "type": "string",
-                                "description": "ID of the goal that depends on the parent"
+                                "description": "UUID of the dependent goal (must be obtained from get_user_goals or get_available_goals response)"
                             },
                             "dependency_type": {
                                 "type": "string",
-                                "description": "Type of dependency relationship",
-                                "enum": ["requires", "blocks", "enables", "suggests"]
+                                "description": "Type of dependency relationship:\n- requires: Dependent goal cannot start until parent is completed\n- enables: Parent goal completion unlocks the dependent goal\n- blocks: Goals are mutually exclusive\n- related: Goals are related but no strict dependency\n- parallel: Goals can be worked on simultaneously",
+                                "enum": [e.value for e in DependencyType]
                             },
                             "strength": {
                                 "type": "integer",
                                 "description": "Dependency strength from 1 (weak) to 5 (strong)",
                                 "minimum": 1,
                                 "maximum": 5
-                            },
-                            "notes": {
-                                "type": "string",
-                                "description": "Additional notes about this dependency"
                             }
                         },
                         "required": ["parent_goal_id", "dependent_goal_id"]
@@ -206,6 +206,270 @@ class LLMToolRegistry:
                     "parameters": {
                         "type": "object",
                         "properties": {}
+                    }
+                }
+            }
+        )
+
+        self._register_tool(
+            name="get_goal_by_id",
+            function=self.goal_tools.get_goal_by_id,
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "get_goal_by_id",
+                    "description": "Get a specific goal by its UUID",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal_id": {
+                                "type": "string",
+                                "description": "UUID of the goal to retrieve"
+                            }
+                        },
+                        "required": ["goal_id"]
+                    }
+                }
+            }
+        )
+
+        # Goal editing tools
+        self._register_tool(
+            name="update_goal_title",
+            function=self.goal_tools.update_goal_title,
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "update_goal_title",
+                    "description": "Update goal title",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal_id": {
+                                "type": "string",
+                                "description": "ID of the goal to update"
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "New goal title"
+                            }
+                        },
+                        "required": ["goal_id", "title"]
+                    }
+                }
+            }
+        )
+
+        self._register_tool(
+            name="update_goal_description",
+            function=self.goal_tools.update_goal_description,
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "update_goal_description",
+                    "description": "Update goal description",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal_id": {
+                                "type": "string",
+                                "description": "ID of the goal to update"
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "New goal description"
+                            }
+                        },
+                        "required": ["goal_id"]
+                    }
+                }
+            }
+        )
+
+        self._register_tool(
+            name="update_goal_priority",
+            function=self.goal_tools.update_goal_priority,
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "update_goal_priority",
+                    "description": "Update goal priority level",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal_id": {
+                                "type": "string",
+                                "description": "ID of the goal to update"
+                            },
+                            "priority": {
+                                "type": "integer",
+                                "description": "Priority level from 1 (low) to 5 (high)",
+                                "minimum": 1,
+                                "maximum": 5
+                            }
+                        },
+                        "required": ["goal_id", "priority"]
+                    }
+                }
+            }
+        )
+
+        self._register_tool(
+            name="update_goal_deadline",
+            function=self.goal_tools.update_goal_deadline,
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "update_goal_deadline",
+                    "description": "Update goal deadline",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal_id": {
+                                "type": "string",
+                                "description": "ID of the goal to update"
+                            },
+                            "deadline": {
+                                "type": "string",
+                                "description": "Target completion date in YYYY-MM-DD format, or null to remove",
+                                "format": "date"
+                            }
+                        },
+                        "required": ["goal_id"]
+                    }
+                }
+            }
+        )
+
+        self._register_tool(
+            name="update_goal_category",
+            function=self.goal_tools.update_goal_category,
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "update_goal_category",
+                    "description": "Update goal category",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal_id": {
+                                "type": "string",
+                                "description": "ID of the goal to update"
+                            },
+                            "category": {
+                                "type": "string",
+                                "description": "Goal category: career (work/professional), health (fitness/wellness), learning (education/skills), finance (money/savings), personal (self-improvement), social (relationships), creative (art/hobbies)",
+                                "enum": [e.value for e in GoalCategory]
+                            }
+                        },
+                        "required": ["goal_id"]
+                    }
+                }
+            }
+        )
+
+        self._register_tool(
+            name="update_goal_motivation",
+            function=self.goal_tools.update_goal_motivation,
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "update_goal_motivation",
+                    "description": "Update goal motivation",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal_id": {
+                                "type": "string",
+                                "description": "ID of the goal to update"
+                            },
+                            "motivation": {
+                                "type": "string",
+                                "description": "Why this goal is important"
+                            }
+                        },
+                        "required": ["goal_id"]
+                    }
+                }
+            }
+        )
+
+        self._register_tool(
+            name="update_goal_success_criteria",
+            function=self.goal_tools.update_goal_success_criteria,
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "update_goal_success_criteria",
+                    "description": "Update goal success criteria",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal_id": {
+                                "type": "string",
+                                "description": "ID of the goal to update"
+                            },
+                            "success_criteria": {
+                                "type": "string",
+                                "description": "How to measure success for this goal"
+                            }
+                        },
+                        "required": ["goal_id"]
+                    }
+                }
+            }
+        )
+
+        self._register_tool(
+            name="update_goal_difficulty",
+            function=self.goal_tools.update_goal_difficulty,
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "update_goal_difficulty",
+                    "description": "Update goal difficulty level",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal_id": {
+                                "type": "string",
+                                "description": "ID of the goal to update"
+                            },
+                            "difficulty_level": {
+                                "type": "integer",
+                                "description": "Difficulty level from 0 (very easy) to 10 (very hard)",
+                                "minimum": 0,
+                                "maximum": 10
+                            }
+                        },
+                        "required": ["goal_id", "difficulty_level"]
+                    }
+                }
+            }
+        )
+
+        self._register_tool(
+            name="update_goal_duration",
+            function=self.goal_tools.update_goal_duration,
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "update_goal_duration",
+                    "description": "Update goal estimated duration",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal_id": {
+                                "type": "string",
+                                "description": "ID of the goal to update"
+                            },
+                            "estimated_duration_days": {
+                                "type": "integer",
+                                "description": "Estimated number of days to complete, or null to remove",
+                                "minimum": 1
+                            }
+                        },
+                        "required": ["goal_id"]
                     }
                 }
             }
@@ -357,6 +621,43 @@ class LLMToolRegistry:
                                 "description": "Maximum number of events to return"
                             }
                         }
+                    }
+                }
+            }
+        )
+
+        self._register_tool(
+            name="record_mood",
+            function=self.mental_state_tools.record_mood,
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "record_mood",
+                    "description": "Record user's mood and mental state directly (automatic polling)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "mood": {
+                                "type": "string",
+                                "description": "User's mood",
+                                "enum": ["great", "good", "neutral", "tired", "stressed"]
+                            },
+                            "readiness_level": {
+                                "type": "integer",
+                                "description": "User's readiness level (1-10)",
+                                "minimum": 1,
+                                "maximum": 10
+                            },
+                            "notes": {
+                                "type": "string",
+                                "description": "Additional notes about mental state"
+                            },
+                            "date_str": {
+                                "type": "string",
+                                "description": "Date for the mood record (ISO format), defaults to today"
+                            }
+                        },
+                        "required": ["mood"]
                     }
                 }
             }
@@ -617,24 +918,8 @@ class LLMToolRegistry:
 
         # DateTime and utility tools
         self._register_tool(
-            name="get_current_time",
-            function=self.datetime_tools.get_current_time,
-            schema={
-                "type": "function",
-                "function": {
-                    "name": "get_current_time",
-                    "description": "Get current date and time for scheduling and deadline calculations",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {}
-                    }
-                }
-            }
-        )
-
-        self._register_tool(
             name="suggest_goal_breakdown",
-            function=self.datetime_tools.suggest_goal_breakdown,
+            function=self.goal_analysis_helpers.suggest_goal_breakdown,
             schema={
                 "type": "function",
                 "function": {
@@ -658,39 +943,7 @@ class LLMToolRegistry:
             }
         )
 
-        self._register_tool(
-            name="find_potential_goal_connections",
-            function=self.datetime_tools.find_potential_goal_connections,
-            schema={
-                "type": "function",
-                "function": {
-                    "name": "find_potential_goal_connections",
-                    "description": "Analyze potential relationships between a new goal and existing goals",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "new_goal_title": {
-                                "type": "string",
-                                "description": "Title of the new goal to analyze"
-                            },
-                            "existing_goals": {
-                                "type": "array",
-                                "description": "List of existing goals with their details",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "title": {"type": "string"},
-                                        "description": {"type": "string"},
-                                        "category": {"type": "string"}
-                                    }
-                                }
-                            }
-                        },
-                        "required": ["new_goal_title", "existing_goals"]
-                    }
-                }
-            }
-        )
+
 
     def _register_tool(self, name: str, function: Callable, schema: Dict[str, Any]) -> None:
         """Register a tool with its schema and function."""
@@ -708,7 +961,7 @@ class LLMToolRegistry:
 
     async def call_function(self, function_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Call a registered function with provided arguments."""
-        logger.info(f"Calling function: {function_name} with arguments: {arguments}")
+        logger.info(f"Calling function: {function_name} with args: {arguments}")
 
         if function_name not in self._functions:
             logger.error(f"Unknown function: {function_name}")
@@ -716,26 +969,17 @@ class LLMToolRegistry:
 
         try:
             function = self._functions[function_name]
-            logger.info(f"Function {function_name} is async: {asyncio.iscoroutinefunction(function)}")
 
-            # Ensure we're in proper async context for database operations
             if asyncio.iscoroutinefunction(function):
-                logger.info(f"About to call async function {function_name}")
-                # Create task to ensure proper async context
-                task = asyncio.create_task(function(**arguments))
-                result = await task
-                logger.info(f"Async function {function_name} completed successfully")
+                result = await function(**arguments)
             else:
-                logger.info(f"Calling sync function {function_name}")
                 result = function(**arguments)
 
-            logger.info(f"Successfully called {function_name} with result: {result}")
+            logger.info(f"Successfully called {function_name}")
             return result
         except Exception as e:
             error_msg = f"Error calling {function_name}: {str(e)}"
-            logger.error(error_msg)
-            logger.error(f"Exception type: {type(e)}")
-            logger.error(f"Exception details: {e}", exc_info=True)
+            logger.error(error_msg, exc_info=True)
             return {"error": error_msg}
 
     async def process_function_calls(self, function_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

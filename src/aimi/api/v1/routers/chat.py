@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.exceptions import WebSocketException
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from aimi.api.v1.deps import get_auth_service, get_current_user, get_db_session
+from aimi.api.v1.deps import get_auth_service, get_current_user, get_uow_dependency
+from aimi.db.session import UnitOfWork, get_unit_of_work
 from aimi.api.v1.schemas import SuccessResponse
 from aimi.api.v1.schemas.chat import (
     ChatListItem,
@@ -21,12 +21,13 @@ from aimi.api.v1.schemas.chat import (
     SendMessageRequest,
     SendMessageResponse,
 )
-from aimi.db.models import Chat, User
-from aimi.repositories.users import UserRepository
+from aimi.db.models import Chat, User, MessageRole
 from aimi.services.auth import AuthService
 from aimi.services.chat import ChatService
 from aimi.services.connection_manager import connection_manager
 from aimi.services.deps import get_chat_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 ws_router = APIRouter(prefix="/ws", tags=["chats"])
@@ -34,7 +35,7 @@ ws_router = APIRouter(prefix="/ws", tags=["chats"])
 
 async def _get_current_user_ws(
     websocket: WebSocket,
-    session: AsyncSession = Depends(get_db_session),
+    uow: UnitOfWork = Depends(get_uow_dependency),
     auth_service: AuthService = Depends(get_auth_service),
 ) -> User:
     """Authenticate WebSocket connection using bearer token."""
@@ -53,8 +54,7 @@ async def _get_current_user_ws(
             reason="Invalid or expired token",
         ) from exc
 
-    repo = UserRepository(session)
-    user = await repo.get_by_id(user_id)
+    user = await uow.users().get_by_id(user_id)
     if user is None or not user.is_active:
         raise WebSocketException(
             code=status.WS_1008_POLICY_VIOLATION,
@@ -68,6 +68,7 @@ async def create_chat(
     request: CreateChatRequest = ...,
     current_user: User = Depends(get_current_user),
     chat_service: ChatService = Depends(get_chat_service),
+    uow: UnitOfWork = Depends(get_uow_dependency),
 ) -> SuccessResponse[CreateChatResponse]:
     """Create a new chat."""
     chat_id = uuid4()
@@ -77,6 +78,7 @@ async def create_chat(
 
     # Use ChatService to ensure chat exists (this will create it)
     await chat_service._ensure_chat_exists(
+        uow=uow,
         chat_id=chat_id,
         user_id=current_user.id,
         title=request.title,
@@ -95,15 +97,10 @@ async def create_chat(
 @router.get("/", response_model=SuccessResponse[ChatListResponse])
 async def list_chats(
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session),
+    uow: UnitOfWork = Depends(get_uow_dependency),
 ) -> SuccessResponse[ChatListResponse]:
     """Get all chats for current user."""
-    result = await db.execute(
-        select(Chat)
-        .where(Chat.user_id == current_user.id)
-        .order_by(Chat.last_active_at.desc().nulls_last(), Chat.created_at.desc())
-    )
-    chats = result.scalars().all()
+    chats = await uow.chats().get_user_chats(current_user.id)
 
     chat_items = [
         ChatListItem(
@@ -129,9 +126,10 @@ async def delete_chat(
     chat_id: UUID = Path(...),
     current_user: User = Depends(get_current_user),
     chat_service: ChatService = Depends(get_chat_service),
+    uow: UnitOfWork = Depends(get_uow_dependency),
 ) -> SuccessResponse[dict]:
     """Delete a chat and all its messages."""
-    success = await chat_service.delete_chat(chat_id, current_user.id)
+    success = await chat_service.delete_chat(uow, chat_id, current_user.id)
 
     if not success:
         raise HTTPException(
@@ -149,9 +147,11 @@ async def get_chat_messages(
     offset: int = Query(0, ge=0, description="Number of messages to skip"),
     current_user: User = Depends(get_current_user),
     chat_service: ChatService = Depends(get_chat_service),
+    uow: UnitOfWork = Depends(get_uow_dependency),
 ) -> SuccessResponse[MessageHistoryResponse]:
     """Get message history for a chat."""
     result = await chat_service.get_chat_messages(
+        uow=uow,
         chat_id=chat_id,
         user_id=current_user.id,
         limit=limit,
@@ -167,27 +167,29 @@ async def send_message(
     request: SendMessageRequest = ...,
     current_user: User = Depends(get_current_user),
     chat_service: ChatService = Depends(get_chat_service),
+    uow: UnitOfWork = Depends(get_uow_dependency),
 ) -> SuccessResponse[SendMessageResponse]:
     """Send message to chat via REST API."""
-    result = await chat_service.send_message(
+    messages = await chat_service.send_message(
+        uow=uow,
         chat_id=chat_id,
         content=request.content,
         client_msg_id=request.client_msg_id,
         user_id=current_user.id,
     )
 
-    # Convert Message object to dict for JSON serialization
-    if hasattr(result, 'role'):  # Check if it's a Message object
-        result_dict = {
-            "id": str(result.id),
-            "seq": result.seq,
-            "role": result.role,
-            "content": result.content,
-            "created_at": result.created_at.isoformat(),
-            "request_id": str(result.request_id) if result.request_id else None,
-        }
-    else:
-        result_dict = result
+    # Convert last assistant message for REST response (backward compatibility)
+    assistant_messages = [msg for msg in messages if msg.role == MessageRole.ASSISTANT.value]
+    last_message = assistant_messages[-1] if assistant_messages else messages[-1]
+
+    result_dict = {
+        "id": str(last_message.id),
+        "seq": last_message.seq,
+        "role": last_message.role,
+        "content": last_message.content,
+        "created_at": last_message.created_at.isoformat(),
+        "request_id": str(last_message.request_id) if last_message.request_id else None,
+    }
 
     return SuccessResponse(data=SendMessageResponse(**result_dict))
 
@@ -200,6 +202,7 @@ async def chat_websocket(
     chat_service: ChatService = Depends(get_chat_service),
 ) -> None:
     """WebSocket endpoint for real-time chat."""
+    logger.info(f"[WS] WebSocket connected for chat {chat_id}, user {current_user.id}")
     await websocket.accept()
 
     # Register connection in manager
@@ -208,7 +211,9 @@ async def chat_websocket(
     try:
         while True:
             # Receive message
+            logger.info(f"[WS] Waiting for message...")
             message_data = await websocket.receive_json()
+            logger.info(f"[WS] Received message data: {message_data}")
 
             if not isinstance(message_data, dict) or "content" not in message_data:
                 await websocket.send_json({
@@ -227,38 +232,60 @@ async def chat_websocket(
             client_msg_id = message_data.get("client_msg_id")
 
             try:
-                # Send "thinking" message for long processing
-                await websocket.send_json({
-                    "status": "thinking",
-                    "message": "Обрабатываю ваш запрос..."
-                })
+                logger.info(f"[WS] Processing message from user {current_user.id} in chat {chat_id}: '{content[:50]}...'")
 
-                # Process message
-                result = await chat_service.send_message(
-                    chat_id=chat_id,
-                    content=content,
-                    client_msg_id=client_msg_id,
-                    user_id=current_user.id,
-                )
+                # Step 1: Save user message and return immediately
+                async with get_unit_of_work() as uow:
+                    logger.info(f"[WS] Saving user message...")
+                    user_msg = await chat_service.save_user_message(
+                        uow=uow,
+                        chat_id=chat_id,
+                        content=content,
+                        client_msg_id=client_msg_id,
+                        user_id=current_user.id,
+                    )
+                    logger.info(f"[WS] User message saved with seq: {user_msg.seq}")
 
-                # Convert Message object to dict for JSON serialization
-                if hasattr(result, 'role'):  # Check if it's a Message object
-                    result_dict = {
-                        "id": str(result.id),
-                        "seq": result.seq,
-                        "role": result.role,
-                        "content": result.content,
-                        "created_at": result.created_at.isoformat(),
-                        "request_id": str(result.request_id) if result.request_id else None,
+                # Send user message immediately
+                user_message_dict = {
+                    "id": str(user_msg.id),
+                    "seq": user_msg.seq,
+                    "role": user_msg.role,
+                    "content": user_msg.content,
+                    "created_at": user_msg.created_at.isoformat(),
+                    "request_id": str(user_msg.request_id) if user_msg.request_id else client_msg_id,
+                    "chat_id": str(user_msg.chat_id),
+                }
+                await websocket.send_json(user_message_dict)
+                logger.info(f"[WS] Sent user message immediately")
+
+                # Step 2: Generate assistant response
+                async with get_unit_of_work() as uow:
+                    logger.info(f"[WS] Generating assistant response...")
+                    assistant_messages = await chat_service.generate_assistant_response(
+                        uow=uow,
+                        chat_id=chat_id,
+                        user_content=content,
+                        user_id=current_user.id,
+                    )
+                    logger.info(f"[WS] Generated {len(assistant_messages)} assistant messages")
+
+                # Send all assistant messages
+                for i, message in enumerate(assistant_messages):
+                    logger.info(f"[WS] Sending assistant message {i+1}/{len(assistant_messages)}: role={message.role}")
+
+                    message_dict = {
+                        "id": str(message.id),
+                        "seq": message.seq,
+                        "role": message.role,
+                        "content": message.content,
+                        "created_at": message.created_at.isoformat(),
+                        "request_id": client_msg_id,  # Link to original request
+                        "chat_id": str(message.chat_id),
                     }
-                else:
-                    result_dict = result
 
-                # Send response
-                await websocket.send_json({
-                    "status": "success",
-                    "data": result_dict,
-                })
+                    await websocket.send_json(message_dict)
+                    logger.info(f"[WS] Successfully sent assistant message {i+1} to client")
 
             except Exception as e:
                 await websocket.send_json({

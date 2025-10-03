@@ -5,10 +5,9 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from aimi.api.v1.deps import get_current_user, get_db_session
-from aimi.repositories.goals import GoalRepository
+from aimi.api.v1.deps import get_current_user, get_uow_dependency
+from aimi.db.session import UnitOfWork
 from aimi.api.v1.schemas import SuccessResponse
 from aimi.api.v1.schemas.goals import (
     UpdateGoalRequest,
@@ -56,10 +55,10 @@ def _map_goal(goal, dependencies: list = None) -> GoalItem:
 async def list_goals(
     status: str | None = Query(None, description="Filter by status (todo, blocked, done, canceled)"),
     current_user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_db_session),
+    uow: UnitOfWork = Depends(get_uow_dependency),
 ) -> SuccessResponse[GoalListResponse]:
     """Get all goals for current user."""
-    repo = GoalRepository(session)
+    repo = uow.goals()
 
     # Convert status string to enum if provided
     status_enum = None
@@ -93,10 +92,10 @@ async def update_goal_status(
     goal_id: UUID,
     request: UpdateGoalRequest,
     current_user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_db_session),
+    uow: UnitOfWork = Depends(get_uow_dependency),
 ) -> SuccessResponse[GoalItem]:
     """Update goal status and other fields."""
-    repo = GoalRepository(session)
+    repo = uow.goals()
 
     goal = await repo.get_by_id(goal_id)
     if not goal or goal.user_id != current_user.id:
@@ -109,7 +108,7 @@ async def update_goal_status(
     update_data = request.model_dump(exclude_unset=True)
     goal = await repo.update_goal(goal, **update_data)
 
-    await session.commit()
+    await uow.commit()
     await session.refresh(goal)
 
     # Get dependencies

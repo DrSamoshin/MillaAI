@@ -6,7 +6,7 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import TIMESTAMP, CheckConstraint, Date, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import TIMESTAMP, CheckConstraint, Date, Enum, ForeignKey, Integer, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -67,6 +67,10 @@ class Goal(Base):
     estimated_duration_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     difficulty_level: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     deadline: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+
+    # Motivation and context fields
+    motivation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    success_criteria: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),

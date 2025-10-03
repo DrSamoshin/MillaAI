@@ -6,7 +6,6 @@ from functools import lru_cache
 
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from aimi.core.config import get_settings
 from aimi.core.errors import ServiceError
@@ -14,9 +13,8 @@ from aimi.core.redis import get_redis_client
 from aimi.llm.client import LLMClient
 from aimi.llm.openai import OpenAIChatClient
 from aimi.db.models import User
-from aimi.repositories.users import UserRepository
 from aimi.services.auth import AuthService
-from aimi.db.session import get_db_session
+from aimi.db.session import get_uow_dependency, UnitOfWork
 
 
 @lru_cache
@@ -54,7 +52,7 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Security(bearer_scheme),
-    session: AsyncSession = Depends(get_db_session),
+    uow: UnitOfWork = Depends(get_uow_dependency),
     service: AuthService = Depends(get_auth_service),
 ) -> User:
     if credentials is None or not credentials.credentials:
@@ -73,8 +71,7 @@ async def get_current_user(
             detail="Invalid or expired token",
         ) from exc
 
-    repo = UserRepository(session)
-    user = await repo.get_by_id(user_id)
+    user = await uow.users().get_by_id(user_id)
     if user is None or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -85,7 +82,7 @@ async def get_current_user(
 
 __all__: list[str] = [
     "get_llm_client",
-    "get_db_session",
+    "get_uow_dependency",
     "get_auth_service",
     "get_current_user",
     "get_redis",
